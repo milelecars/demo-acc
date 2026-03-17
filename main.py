@@ -24,16 +24,19 @@ def binance_signed(path, params={}):
     url = f'{BINANCE_BASE}{path}?{qs}&signature={sig}'
     return requests.get(url, headers={'X-MBX-APIKEY': API_KEY}).json()
 
-@app.route('/proxy/account')
-def proxy_account():
+
+@app.route('/proxy/v3/account')
+def proxy_v3_account():
     return jsonify(binance_signed('/v3/account'))
 
-@app.route('/proxy/openOrders')
-def proxy_open_orders():
+
+@app.route('/proxy/v3/openOrders')
+def proxy_v3_open_orders():
     return jsonify(binance_signed('/v3/openOrders'))
 
-@app.route('/proxy/allOrders')
-def proxy_all_orders():
+
+@app.route('/proxy/v3/allOrders')
+def proxy_v3_all_orders():
     sym = request.args.get('symbol', '')
     return jsonify(binance_signed('/v3/allOrders', {'symbol': sym, 'limit': 100}))
 
