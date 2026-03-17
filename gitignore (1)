@@ -1,7 +1,0 @@
-# Never commit these
-.env
-*.log
-trade_log.csv
-__pycache__/
-*.pyc
-.env.template
