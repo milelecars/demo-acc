@@ -130,31 +130,6 @@
   .btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
   .btn-primary:hover { background: #1d4ed8; }
 
-  /* NOTICE BAR (replaces manual key input) */
-  .notice {
-    background: var(--blue-bg);
-    border-bottom: 1px solid #bfdbfe;
-    padding: 10px 24px;
-    font-size: 13px;
-    color: var(--blue);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-  }
-
-  .notice strong { font-weight: 600; }
-  .notice code {
-    font-family: var(--mono);
-    font-size: 11px;
-    background: rgba(37,99,235,0.12);
-    padding: 2px 6px;
-    border-radius: 4px;
-  }
-
-  .notice-hide { cursor:pointer; font-size:16px; opacity:0.6; }
-  .notice-hide:hover { opacity:1; }
-
   /* ERROR */
   .error-bar {
     margin: 12px 24px 0;
@@ -221,6 +196,7 @@
     display: grid;
     grid-template-columns: 1fr 320px;
     gap: 16px;
+    align-items: start;
   }
   @media (max-width:1000px) { .two-col { grid-template-columns: 1fr; } }
 
@@ -231,6 +207,8 @@
     border-radius: var(--r);
     box-shadow: var(--shadow);
     overflow: hidden;
+    display: flex;
+    flex-direction: column;
   }
 
   .panel-hdr {
@@ -240,6 +218,7 @@
     align-items: center;
     justify-content: space-between;
     background: var(--bg3);
+    flex-shrink: 0;
   }
 
   .panel-title {
@@ -269,6 +248,7 @@
     flex-wrap: wrap;
     align-items: center;
     background: var(--bg);
+    flex-shrink: 0;
   }
 
   .f-input, .f-sel {
@@ -304,8 +284,12 @@
     font-weight: 600;
   }
 
-  /* TABLE */
-  .tbl-wrap { overflow-x: auto; }
+  /* TABLE — scrollable body */
+  .tbl-wrap {
+    overflow-y: auto;
+    overflow-x: auto;
+    max-height: 520px;
+  }
 
   table { width:100%; border-collapse:collapse; }
 
@@ -323,6 +307,9 @@
     cursor: pointer;
     user-select: none;
     transition: color 0.15s;
+    position: sticky;
+    top: 0;
+    z-index: 1;
   }
   thead th:hover  { color: var(--text); }
   thead th.sorted { color: var(--accent); }
@@ -350,8 +337,6 @@
   .tag-win   { background: var(--green-bg); color: var(--green); }
   .tag-loss  { background: var(--red-bg);   color: var(--red);   }
   .tag-open  { background: var(--blue-bg);  color: var(--blue);  }
-  .tag-ema   { background: #ede9fe;         color: #7c3aed;      }
-  .tag-ma44  { background: #d1fae5;         color: #065f46;      }
 
   .pnl-pos { color: var(--green); font-weight: 600; font-family: var(--mono); }
   .pnl-neg { color: var(--red);   font-weight: 600; font-family: var(--mono); }
@@ -366,12 +351,25 @@
     line-height: 2;
   }
 
+  /* RIGHT COLUMN */
+  .right-col {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  /* SCROLLABLE PANEL BODY */
+  .panel-scroll {
+    overflow-y: auto;
+    max-height: 280px;
+  }
+
   /* BALANCE LIST */
   .bal-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 11px 18px;
+    padding: 10px 18px;
     border-bottom: 1px solid var(--border);
     transition: background 0.12s;
   }
@@ -381,17 +379,18 @@
   .bal-left { display: flex; align-items: center; gap: 10px; }
 
   .bal-icon {
-    width: 32px; height: 32px;
+    width: 30px; height: 30px;
     border-radius: 50%;
     background: linear-gradient(135deg, var(--blue-bg), var(--bg3));
     border: 1px solid var(--border);
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 9px;
+    font-size: 8px;
     font-weight: 700;
     color: var(--accent);
     font-family: var(--mono);
+    flex-shrink: 0;
   }
 
   .bal-name { font-weight: 600; font-size: 13px; }
@@ -441,8 +440,8 @@
     font-family: var(--mono);
   }
 
-  ::-webkit-scrollbar { width:6px; height:6px; }
-  ::-webkit-scrollbar-track { background:var(--bg); }
+  ::-webkit-scrollbar { width:5px; height:5px; }
+  ::-webkit-scrollbar-track { background:transparent; }
   ::-webkit-scrollbar-thumb { background:var(--border2); border-radius:3px; }
   ::-webkit-scrollbar-thumb:hover { background:var(--muted); }
 </style>
@@ -467,8 +466,6 @@
     <button class="btn btn-primary" onclick="loadAll()">↻ Refresh</button>
   </div>
 </div>
-
-
 
 <div class="error-bar" id="errorBar"></div>
 
@@ -517,7 +514,6 @@
         <span class="panel-title">Order History</span>
         <span class="count-pill" id="tradeCount">0 orders</span>
       </div>
-
       <div class="filter-bar">
         <input class="f-input" type="text" id="filterSymbol" placeholder="Symbol..." oninput="applyFilters()">
         <select class="f-sel" id="filterOutcome" onchange="applyFilters()">
@@ -535,7 +531,6 @@
         <button class="chip"        id="chip-today" onclick="setDate('today')">Today</button>
         <button class="chip"        id="chip-week"  onclick="setDate('week')">7 days</button>
       </div>
-
       <div class="tbl-wrap">
         <table>
           <thead>
@@ -559,26 +554,26 @@
     </div>
 
     <!-- RIGHT COLUMN -->
-    <div style="display:flex;flex-direction:column;gap:16px;">
+    <div class="right-col">
 
-      <!-- BALANCES -->
-      <div class="panel">
-        <div class="panel-hdr">
-          <span class="panel-title">Balances</span>
-          <span class="count-pill" id="balCount">--</span>
-        </div>
-        <div id="balanceList">
-          <div class="loading"><div class="spin"></div>Loading...</div>
-        </div>
-      </div>
-
-      <!-- OPEN ORDERS -->
+      <!-- OPEN ORDERS — on top -->
       <div class="panel">
         <div class="panel-hdr">
           <span class="panel-title">Open Orders</span>
           <span class="count-pill" id="openCount">--</span>
         </div>
-        <div id="openOrdersList">
+        <div class="panel-scroll" id="openOrdersList">
+          <div class="loading"><div class="spin"></div>Loading...</div>
+        </div>
+      </div>
+
+      <!-- BALANCES — below -->
+      <div class="panel">
+        <div class="panel-hdr">
+          <span class="panel-title">Balances</span>
+          <span class="count-pill" id="balCount">--</span>
+        </div>
+        <div class="panel-scroll" id="balanceList">
           <div class="loading"><div class="spin"></div>Loading...</div>
         </div>
       </div>
@@ -593,9 +588,6 @@
 </div>
 
 <script>
-// ============================================================================
-// CONFIG — loaded from config.json in same repo
-// ============================================================================
 const PROXY = 'https://demo-acc-production.up.railway.app/proxy';
 const WATCH_SYMS = [
   'BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT','XRPUSDT','DOGEUSDT',
@@ -605,47 +597,11 @@ const WATCH_SYMS = [
   'PEPEUSDT','BONKUSDT','TRXUSDT','XLMUSDT','KASUSDT','ALGOUSDT',
 ];
 
-let apiKey    = '';
-let apiSecret = '';
 let allTrades = [];
 let sortKey   = 'time';
 let sortAsc   = false;
 let dateFilter = 'all';
 let refreshTmr = null;
-
-// ── Load config.json ─────────────────────────────────────────────────────────
-async function loadConfig() {
-  try {
-    const res = await fetch('./config.json?' + Date.now());
-    if (!res.ok) throw new Error('config.json not found');
-    const cfg = await res.json();
-    apiKey    = cfg.apiKey    || cfg.api_key    || '';
-    apiSecret = cfg.apiSecret || cfg.api_secret || '';
-    if (apiKey && apiSecret) {
-      document.getElementById('configNotice').style.display = 'none';
-      return true;
-    }
-  } catch(e) {
-    console.warn('config.json not loaded:', e.message);
-  }
-  showError(
-    'Could not load config.json. ' +
-    'Add a config.json file to your repo root with: ' +
-    '{"apiKey":"YOUR_KEY","apiSecret":"YOUR_SECRET"}'
-  );
-  return false;
-}
-
-// ============================================================================
-// SIGNING
-// ============================================================================
-async function sign(secret, msg) {
-  const enc = new TextEncoder();
-  const key = await crypto.subtle.importKey('raw', enc.encode(secret),
-    {name:'HMAC', hash:'SHA-256'}, false, ['sign']);
-  const sig = await crypto.subtle.sign('HMAC', key, enc.encode(msg));
-  return Array.from(new Uint8Array(sig)).map(b=>b.toString(16).padStart(2,'0')).join('');
-}
 
 async function signedGet(path, params={}) {
   const qs  = new URLSearchParams(params).toString();
@@ -655,26 +611,25 @@ async function signedGet(path, params={}) {
   return res.json();
 }
 
-// ============================================================================
-// LOAD ALL
-// ============================================================================
 async function loadAll() {
   hideError();
   try {
     await Promise.all([loadBalances(), loadOpenOrders(), loadTrades()]);
     document.getElementById('lastUpd').textContent =
-      'Updated ' + new Date().toLocaleTimeString();
+      'Updated ' + new Date().toLocaleString('en-GB', {
+        timeZone:'Asia/Dubai', hour:'2-digit', minute:'2-digit', second:'2-digit'
+      });
   } catch(e) {
     showError('API error: ' + e.message);
     console.error(e);
   }
 }
 
-// ── Balances ──────────────────────────────────────────────────────────────────
 async function loadBalances() {
   const data   = await signedGet('/v3/account');
+  // filter: only assets with total > 1
   const assets = data.balances.filter(b =>
-    parseFloat(b.free) + parseFloat(b.locked) > 0.0000001
+    parseFloat(b.free) + parseFloat(b.locked) > 1
   );
   assets.sort((a,b) => {
     if (a.asset==='USDT') return -1;
@@ -690,7 +645,7 @@ async function loadBalances() {
 
   const list = document.getElementById('balanceList');
   if (!assets.length) {
-    list.innerHTML = '<div class="empty">No non-zero balances</div>';
+    list.innerHTML = '<div class="empty">No balances</div>';
     return;
   }
 
@@ -701,17 +656,16 @@ async function loadBalances() {
       <div class="bal-row">
         <div class="bal-left">
           <div class="bal-icon">${b.asset.slice(0,4)}</div>
-          <div><div class="bal-name">${b.asset}</div></div>
+          <div class="bal-name">${b.asset}</div>
         </div>
         <div class="bal-amt">
-          <div class="bal-free">${fmt(free,6)}</div>
-          ${locked>0?`<div class="bal-lock">${fmt(locked,6)} locked</div>`:''}
+          <div class="bal-free">${fmt(free,4)}</div>
+          ${locked>0?`<div class="bal-lock">${fmt(locked,4)} locked</div>`:''}
         </div>
       </div>`;
   }).join('');
 }
 
-// ── Open Orders ───────────────────────────────────────────────────────────────
 async function loadOpenOrders() {
   const orders = await signedGet('/v3/openOrders');
   document.getElementById('openCount').textContent = orders.length;
@@ -747,7 +701,6 @@ async function loadOpenOrders() {
   }).join('');
 }
 
-// ── Trade / Order History ─────────────────────────────────────────────────────
 async function loadTrades() {
   const results = await Promise.allSettled(
     WATCH_SYMS.map(sym =>
@@ -757,11 +710,10 @@ async function loadTrades() {
           .map(o => ({
             time:      o.time,
             symbol:    o.symbol,
-            strategy:  'EXCHANGE',
             direction: o.side === 'BUY' ? 'LONG' : 'SHORT',
             entry:     parseFloat(o.cummulativeQuoteQty) / parseFloat(o.executedQty) || parseFloat(o.price),
             qty:       parseFloat(o.executedQty),
-            sl: 0, tp: 0, pnl: 0,
+            pnl:       0,
             outcome:   'FILLED',
             orderId:   o.orderId,
           }))
@@ -778,13 +730,14 @@ async function loadTrades() {
   applyFilters();
 }
 
-// ── Stats ─────────────────────────────────────────────────────────────────────
 function updateStats() {
   document.getElementById('statTotal').textContent = allTrades.length;
 
-  const today = new Date().toDateString();
+  const todayStr = new Date().toLocaleDateString('en-GB', {timeZone:'Asia/Dubai'});
   document.getElementById('statToday').textContent =
-    allTrades.filter(t => new Date(t.time).toDateString() === today).length;
+    allTrades.filter(t =>
+      new Date(t.time).toLocaleDateString('en-GB', {timeZone:'Asia/Dubai'}) === todayStr
+    ).length;
 
   const wins   = allTrades.filter(t => t.outcome === 'WIN').length;
   const losses = allTrades.filter(t => t.outcome === 'LOSS').length;
@@ -806,7 +759,6 @@ function updateStats() {
   pel.className   = 'stat-value ' + (pnl >= 0 ? 'c-green' : 'c-red');
 }
 
-// ── Filters + Render ──────────────────────────────────────────────────────────
 function setDate(f) {
   dateFilter = f;
   ['all','today','week'].forEach(c =>
@@ -822,11 +774,11 @@ function applyFilters() {
   const DAY = 86400000, WEEK = 7 * DAY;
 
   let list = allTrades.filter(t => {
-    if (sym && !t.symbol.includes(sym))   return false;
-    if (out && t.outcome !== out)          return false;
-    if (dir && t.direction !== dir)        return false;
-    if (dateFilter === 'today' && now - t.time > DAY)  return false;
-    if (dateFilter === 'week'  && now - t.time > WEEK) return false;
+    if (sym && !t.symbol.includes(sym))                    return false;
+    if (out && t.outcome !== out)                          return false;
+    if (dir && t.direction !== dir)                        return false;
+    if (dateFilter === 'today' && now - t.time > DAY)      return false;
+    if (dateFilter === 'week'  && now - t.time > WEEK)     return false;
     return true;
   });
 
@@ -849,9 +801,10 @@ function renderTrades(trades) {
   }
 
   tbody.innerHTML = trades.map(t => {
-    const ts = new Date(t.time).toLocaleString('en-GB',
-      {day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit',
-      timeZone: 'Asia/Dubai'});
+    const ts = new Date(t.time).toLocaleString('en-GB', {
+      day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit',
+      timeZone: 'Asia/Dubai'
+    });
     const side = t.direction === 'LONG'
       ? '<span class="tag tag-long">BUY</span>'
       : '<span class="tag tag-short">SELL</span>';
@@ -868,14 +821,13 @@ function renderTrades(trades) {
       <td class="mono"><strong>${t.symbol.replace('USDT','')}</strong><span style="color:var(--muted)">/USDT</span></td>
       <td>${side}</td>
       <td class="mono">${t.entry > 0 ? fmtP(t.entry) : '--'}</td>
-      <td class="mono" style="color:var(--muted)">${fmt(t.qty,6)}</td>
+      <td class="mono" style="color:var(--muted)">${fmt(t.qty,4)}</td>
       <td>${out}</td>
       <td>${pnl}</td>
     </tr>`;
   }).join('');
 }
 
-// ── Sort ──────────────────────────────────────────────────────────────────────
 function sortBy(key) {
   if (sortKey === key) sortAsc = !sortAsc;
   else { sortKey = key; sortAsc = false; }
@@ -883,14 +835,12 @@ function sortBy(key) {
   applyFilters();
 }
 
-// ── Auto refresh ──────────────────────────────────────────────────────────────
 function setAutoRefresh() {
   if (refreshTmr) clearInterval(refreshTmr);
   const rate = parseInt(document.getElementById('refreshRate').value);
   if (rate > 0) refreshTmr = setInterval(loadAll, rate * 1000);
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
 function fmtP(n) {
   if (n >= 1000) return n.toLocaleString('en', {maximumFractionDigits:2});
   if (n >= 1)    return n.toFixed(4);
@@ -918,7 +868,7 @@ function tick() {
   });
   document.getElementById('footerTime').textContent = now + ' GMT+4';
 }
-// ── Init ──────────────────────────────────────────────────────────────────────
+
 window.addEventListener('load', () => {
   tick(); setInterval(tick, 1000);
   loadAll();
