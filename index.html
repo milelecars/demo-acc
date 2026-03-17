@@ -685,8 +685,9 @@ async function loadBalances() {
 
 async function loadOpenOrders() {
   const orders = await signedGet('/v3/openOrders');
-  document.getElementById('openCount').textContent = orders.length;
-  document.getElementById('statOpen').textContent  = orders.length;
+  const uniqueSymbols = new Set(orders.map(o => o.symbol)).size;
+  document.getElementById('openCount').textContent = uniqueSymbols;
+  document.getElementById('statOpen').textContent  = uniqueSymbols;
 
   const list = document.getElementById('openOrdersList');
   if (!orders.length) {
