@@ -604,7 +604,7 @@
 // ============================================================================
 // CONFIG — loaded from config.json in same repo
 // ============================================================================
-const PROXY       = 'https://demo-acc-production.up.railway.app';
+const PROXY = 'https://demo-acc-production.up.railway.app/proxy';
 const WATCH_SYMS = [
   'BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT','XRPUSDT','DOGEUSDT',
   'ADAUSDT','AVAXUSDT','LINKUSDT','DOTUSDT','UNIUSDT','AAVEUSDT',
@@ -667,10 +667,6 @@ async function signedGet(path, params={}) {
 // LOAD ALL
 // ============================================================================
 async function loadAll() {
-  if (!apiKey || !apiSecret) {
-    const ok = await loadConfig();
-    if (!ok) return;
-  }
   hideError();
   try {
     await Promise.all([loadBalances(), loadOpenOrders(), loadTrades()]);
@@ -898,7 +894,7 @@ function sortBy(key) {
 function setAutoRefresh() {
   if (refreshTmr) clearInterval(refreshTmr);
   const rate = parseInt(document.getElementById('refreshRate').value);
-  if (rate > 0 && apiKey) refreshTmr = setInterval(loadAll, rate * 1000);
+  if (rate > 0) refreshTmr = setInterval(loadAll, rate * 1000);
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -927,13 +923,10 @@ function tick() {
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
-window.addEventListener('load', async () => {
+window.addEventListener('load', () => {
   tick(); setInterval(tick, 1000);
-  await loadConfig();
-  if (apiKey && apiSecret) {
-    loadAll();
-    setAutoRefresh();
-  }
+  loadAll();
+  setAutoRefresh();
 });
 </script>
 </body>
