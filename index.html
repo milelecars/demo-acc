@@ -199,6 +199,15 @@
     align-items: stretch;
   }
 
+  /* TWO-COL (Order History + Balances on right) */
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 320px;
+    gap: 16px;
+    align-items: start;
+  }
+  @media (max-width:1000px) { .two-col { grid-template-columns: 1fr; } }
+
   /* PANEL */
   .panel {
     background: var(--bg2);
@@ -505,75 +514,74 @@
   <!-- MAIN CONTENT -->
   <div class="main-stack">
 
-    <!-- RIGHT COLUMN -->
-    <div class="right-col">
-
-      <!-- OPEN ORDERS — on top -->
-      <div class="panel">
-        <div class="panel-hdr">
-          <span class="panel-title">Open Orders</span>
-          <span class="count-pill" id="openCount">--</span>
-        </div>
-        <div class="panel-scroll" id="openOrdersList">
-          <div class="loading"><div class="spin"></div>Loading...</div>
-        </div>
-      </div>
-
-      <!-- BALANCES — below -->
-      <div class="panel">
-        <div class="panel-hdr">
-          <span class="panel-title">Balances</span>
-          <span class="count-pill" id="balCount">--</span>
-        </div>
-        <div class="panel-scroll" id="balanceList">
-          <div class="loading"><div class="spin"></div>Loading...</div>
-        </div>
-      </div>
-
-    </div>
-
-    <!-- TRADE TABLE -->
+    <!-- OPEN ORDERS -->
     <div class="panel">
       <div class="panel-hdr">
-        <span class="panel-title">Order History</span>
-        <span class="count-pill" id="tradeCount">0 orders</span>
+        <span class="panel-title">Open Orders</span>
+        <span class="count-pill" id="openCount">--</span>
       </div>
-      <div class="filter-bar">
-        <input class="f-input" type="text" id="filterSymbol" placeholder="Symbol..." oninput="applyFilters()">
-        <select class="f-sel" id="filterOutcome" onchange="applyFilters()">
-          <option value="">All outcomes</option>
-          <option value="WIN">WIN</option>
-          <option value="LOSS">LOSS</option>
-          <option value="FILLED">Filled</option>
-        </select>
-        <select class="f-sel" id="filterDir" onchange="applyFilters()">
-          <option value="">All sides</option>
-          <option value="LONG">BUY</option>
-          <option value="SHORT">SELL</option>
-        </select>
-        <button class="chip active" id="chip-all"   onclick="setDate('all')">All time</button>
-        <button class="chip"        id="chip-today" onclick="setDate('today')">Today</button>
-        <button class="chip"        id="chip-week"  onclick="setDate('week')">7 days</button>
+      <div class="panel-scroll" id="openOrdersList">
+        <div class="loading"><div class="spin"></div>Loading...</div>
       </div>
-      <div class="tbl-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th onclick="sortBy('time')">Time</th>
-              <th onclick="sortBy('symbol')">Symbol</th>
-              <th onclick="sortBy('direction')">Side</th>
-              <th onclick="sortBy('entry')">Avg Price</th>
-              <th onclick="sortBy('qty')">Qty</th>
-              <th onclick="sortBy('outcome')">Status</th>
-              <th onclick="sortBy('pnl')">P&L</th>
-            </tr>
-          </thead>
-          <tbody id="tradeBody">
-            <tr><td colspan="7">
-              <div class="empty">Loading order history...</div>
-            </td></tr>
-          </tbody>
-        </table>
+    </div>
+
+    <div class="two-col">
+      <!-- TRADE TABLE -->
+      <div class="panel">
+        <div class="panel-hdr">
+          <span class="panel-title">Order History</span>
+          <span class="count-pill" id="tradeCount">0 orders</span>
+        </div>
+        <div class="filter-bar">
+          <input class="f-input" type="text" id="filterSymbol" placeholder="Symbol..." oninput="applyFilters()">
+          <select class="f-sel" id="filterOutcome" onchange="applyFilters()">
+            <option value="">All outcomes</option>
+            <option value="WIN">WIN</option>
+            <option value="LOSS">LOSS</option>
+            <option value="FILLED">Filled</option>
+          </select>
+          <select class="f-sel" id="filterDir" onchange="applyFilters()">
+            <option value="">All sides</option>
+            <option value="LONG">BUY</option>
+            <option value="SHORT">SELL</option>
+          </select>
+          <button class="chip active" id="chip-all"   onclick="setDate('all')">All time</button>
+          <button class="chip"        id="chip-today" onclick="setDate('today')">Today</button>
+          <button class="chip"        id="chip-week"  onclick="setDate('week')">7 days</button>
+        </div>
+        <div class="tbl-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th onclick="sortBy('time')">Time</th>
+                <th onclick="sortBy('symbol')">Symbol</th>
+                <th onclick="sortBy('direction')">Side</th>
+                <th onclick="sortBy('entry')">Avg Price</th>
+                <th onclick="sortBy('qty')">Qty</th>
+                <th onclick="sortBy('outcome')">Status</th>
+                <th onclick="sortBy('pnl')">P&L</th>
+              </tr>
+            </thead>
+            <tbody id="tradeBody">
+              <tr><td colspan="7">
+                <div class="empty">Loading order history...</div>
+              </td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- BALANCES -->
+      <div class="right-col">
+        <div class="panel">
+          <div class="panel-hdr">
+            <span class="panel-title">Balances</span>
+            <span class="count-pill" id="balCount">--</span>
+          </div>
+          <div class="panel-scroll" id="balanceList">
+            <div class="loading"><div class="spin"></div>Loading...</div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
