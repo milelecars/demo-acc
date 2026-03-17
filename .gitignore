@@ -1,0 +1,38 @@
+# ---- secrets / env ----
+.env
+.env.*
+!.env.example
+
+# ---- logs ----
+*.log
+
+# ---- python ----
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# ---- virtual environments ----
+.venv/
+venv/
+ENV/
+env/
+
+# ---- notebooks / data ----
+.ipynb_checkpoints/
+*.sqlite3
+*.db
+
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.lnk
+.vscode/
+.idea/
+
