@@ -191,14 +191,13 @@
   .c-blue  { color: var(--accent);}
   .mono    { font-family: var(--mono); }
 
-  /* TWO-COL LAYOUT */
-  .two-col {
-    display: grid;
-    grid-template-columns: 1fr 320px;
+  /* MAIN STACK (Order History, then side panels below) */
+  .main-stack {
+    display: flex;
+    flex-direction: column;
     gap: 16px;
-    align-items: start;
+    align-items: stretch;
   }
-  @media (max-width:1000px) { .two-col { grid-template-columns: 1fr; } }
 
   /* PANEL */
   .panel {
@@ -452,8 +451,6 @@
 <div class="header">
   <div class="header-left">
     <div class="logo">Bot<span>Dash</span></div>
-    <div class="pill pill-testnet" id="modePill">TESTNET</div>
-    <div class="live-dot"></div>
   </div>
   <div class="header-right">
     <span class="last-upd" id="lastUpd">--</span>
@@ -506,7 +503,34 @@
   </div>
 
   <!-- MAIN CONTENT -->
-  <div class="two-col">
+  <div class="main-stack">
+
+    <!-- RIGHT COLUMN -->
+    <div class="right-col">
+
+      <!-- OPEN ORDERS — on top -->
+      <div class="panel">
+        <div class="panel-hdr">
+          <span class="panel-title">Open Orders</span>
+          <span class="count-pill" id="openCount">--</span>
+        </div>
+        <div class="panel-scroll" id="openOrdersList">
+          <div class="loading"><div class="spin"></div>Loading...</div>
+        </div>
+      </div>
+
+      <!-- BALANCES — below -->
+      <div class="panel">
+        <div class="panel-hdr">
+          <span class="panel-title">Balances</span>
+          <span class="count-pill" id="balCount">--</span>
+        </div>
+        <div class="panel-scroll" id="balanceList">
+          <div class="loading"><div class="spin"></div>Loading...</div>
+        </div>
+      </div>
+
+    </div>
 
     <!-- TRADE TABLE -->
     <div class="panel">
@@ -552,33 +576,6 @@
         </table>
       </div>
     </div>
-
-    <!-- RIGHT COLUMN -->
-    <div class="right-col">
-
-      <!-- OPEN ORDERS — on top -->
-      <div class="panel">
-        <div class="panel-hdr">
-          <span class="panel-title">Open Orders</span>
-          <span class="count-pill" id="openCount">--</span>
-        </div>
-        <div class="panel-scroll" id="openOrdersList">
-          <div class="loading"><div class="spin"></div>Loading...</div>
-        </div>
-      </div>
-
-      <!-- BALANCES — below -->
-      <div class="panel">
-        <div class="panel-hdr">
-          <span class="panel-title">Balances</span>
-          <span class="count-pill" id="balCount">--</span>
-        </div>
-        <div class="panel-scroll" id="balanceList">
-          <div class="loading"><div class="spin"></div>Loading...</div>
-        </div>
-      </div>
-
-    </div>
   </div>
 </div>
 
@@ -590,11 +587,23 @@
 <script>
 const PROXY = 'https://demo-acc-production.up.railway.app/proxy';
 const WATCH_SYMS = [
-  'BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT','XRPUSDT','DOGEUSDT',
-  'ADAUSDT','AVAXUSDT','LINKUSDT','DOTUSDT','UNIUSDT','AAVEUSDT',
-  'NEARUSDT','ATOMUSDT','LTCUSDT','BCHUSDT','FILUSDT','ARBUSDT',
-  'OPUSDT','INJUSDT','APTUSDT','SUIUSDT','STXUSDT','SEIUSDT',
-  'PEPEUSDT','BONKUSDT','TRXUSDT','XLMUSDT','KASUSDT','ALGOUSDT',
+  'BTCUSDT','ETHUSDT','BNBUSDT','XRPUSDT','SOLUSDT',
+  'TRXUSDT','DOGEUSDT','ADAUSDT','HYPEUSDT','BCHUSDT',
+  'LINKUSDT','XMRUSDT','XLMUSDT','AVAXUSDT','LTCUSDT',
+  'HBARUSDT','SUIUSDT','ZECUSDT','SHIBUSDT','TONUSDT',
+  'CROUSDT','TAOUSDT','DOTUSDT','MNTUSDT','UNIUSDT',
+  'AAVEUSDT','ASTERUSDT','NEARUSDT','PEPEUSDT','SKYUSDT',
+  'ICPUSDT','ETCUSDT','ONDOUSDT','MKRUSDT','WLDUSDT',
+  'POLUSDT','ENAUSDT','RENDERUSDT','ATOMUSDT','TRUMPUSDT',
+  'KASUSDT','ALGOUSDT','QNTUSDT','APTUSDT','FILUSDT',
+  'PUMPUSDT','ZROUSDT','VETUSDT','ARBUSDT','NEXOUSDT',
+  'JUPUSDT','BONKUSDT','PENGUUSDT','CAKEUSDT','VIRTUALUSDT',
+  'FETUSDT','DCRUSDT','STXUSDT','SEIUSDT','DASHUSDT',
+  'ETHFIUSDT','XTZUSDT','CHZUSDT','GNOUSDT','CRVUSDT',
+  'BTTUSDT','IMXUSDT','TIAUSDT','INJUSDT','SYRUPUSDT',
+  'FLOKIUSDT','2ZUSDT','JASMYUSDT','PYTHUSDT','GRTUSDT',
+  'IOTAUSDT','OPUSDT','LDOUSDT','SANDUSDT','ENSUSDT',
+  'BARDUSDT','LUNCUSDT','STRKUSDT','TWTUSDT','RUNEUSDT',
 ];
 
 let allTrades = [];
