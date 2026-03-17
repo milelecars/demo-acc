@@ -468,15 +468,7 @@
   </div>
 </div>
 
-<!-- NOTICE: config.json instructions -->
-<div class="notice" id="configNotice">
-  <span>
-    <strong>Auto-loading keys from config.json.</strong>
-    Add a <code>config.json</code> to your repo root with
-    <code>{"apiKey":"...","apiSecret":"..."}</code> — keys never leave your browser.
-  </span>
-  <span class="notice-hide" onclick="document.getElementById('configNotice').style.display='none'">✕</span>
-</div>
+
 
 <div class="error-bar" id="errorBar"></div>
 
@@ -857,8 +849,9 @@ function renderTrades(trades) {
   }
 
   tbody.innerHTML = trades.map(t => {
-    const ts  = new Date(t.time).toLocaleString('en-GB',
-      {day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit'});
+    const ts = new Date(t.time).toLocaleString('en-GB',
+      {day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit',
+      timeZone: 'Asia/Dubai'});
     const side = t.direction === 'LONG'
       ? '<span class="tag tag-long">BUY</span>'
       : '<span class="tag tag-short">SELL</span>';
@@ -918,10 +911,13 @@ function showError(msg) {
 function hideError() { document.getElementById('errorBar').style.display = 'none'; }
 
 function tick() {
-  document.getElementById('footerTime').textContent =
-    new Date().toUTCString().replace(' GMT','') + ' UTC';
+  const now = new Date().toLocaleString('en-GB', {
+    timeZone: 'Asia/Dubai',
+    day:'2-digit', month:'short', year:'numeric',
+    hour:'2-digit', minute:'2-digit', second:'2-digit'
+  });
+  document.getElementById('footerTime').textContent = now + ' GMT+4';
 }
-
 // ── Init ──────────────────────────────────────────────────────────────────────
 window.addEventListener('load', () => {
   tick(); setInterval(tick, 1000);
