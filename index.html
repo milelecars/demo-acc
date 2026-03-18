@@ -435,26 +435,21 @@ async function loadTrades() {
       .filter(o => o.status === 'FILLED' || o.status === 'PARTIALLY_FILLED')
       .sort((a, b) => a.time - b.time);
 
-    // Entries = MARKET orders only
-    // Exits   = non-MARKET (LIMIT_MAKER, STOP_LOSS_LIMIT, LIMIT)
-    const entries_long  = filled.filter(o => o.side === 'BUY'  && o.type === 'MARKET');
-    const entries_short = filled.filter(o => o.side === 'SELL' && o.type === 'MARKET');
-    const exits_long    = filled.filter(o => o.side === 'SELL' && o.type !== 'MARKET');
-    const exits_short   = filled.filter(o => o.side === 'BUY'  && o.type !== 'MARKET');
-
-    const usedExitsLong  = new Set();
-    const usedExitsShort = new Set();
-
     // ── LONG trades ───────────────────────────────────────────────────────
+    // Only process BUY entries (bot is LONG only on testnet)
+    const entries_long = filled.filter(o => o.side === 'BUY' && o.type === 'MARKET');
+    const exits_long   = filled.filter(o => o.side === 'SELL');  // any SELL = exit
+    const usedExits    = new Set();
+
     entries_long.forEach(buy => {
       const symbol     = buy.symbol;
       const entryPrice = parseFloat(buy.cummulativeQuoteQty) / parseFloat(buy.executedQty) || parseFloat(buy.price);
       const qty        = parseFloat(buy.executedQty);
 
-      const exit = exits_long.find(e => e.time > buy.time && !usedExitsLong.has(e.orderId));
+      const exit = exits_long.find(e => e.time > buy.time && !usedExits.has(e.orderId));
 
       if (exit) {
-        usedExitsLong.add(exit.orderId);
+        usedExits.add(exit.orderId);
         const exitPrice = parseFloat(exit.cummulativeQuoteQty) / parseFloat(exit.executedQty) || parseFloat(exit.price);
         const pnlPct    = ((exitPrice - entryPrice) / entryPrice) * 100;
         trades.push({
@@ -467,34 +462,6 @@ async function loadTrades() {
         trades.push({
           symbol, direction: 'LONG',
           openTime: buy.time, closeTime: null,
-          entryPrice, exitPrice: null, qty,
-          pnlPct: null, outcome: 'OPEN',
-        });
-      }
-    });
-
-    // ── SHORT trades ──────────────────────────────────────────────────────
-    entries_short.forEach(sell => {
-      const symbol     = sell.symbol;
-      const entryPrice = parseFloat(sell.cummulativeQuoteQty) / parseFloat(sell.executedQty) || parseFloat(sell.price);
-      const qty        = parseFloat(sell.executedQty);
-
-      const exit = exits_short.find(e => e.time > sell.time && !usedExitsShort.has(e.orderId));
-
-      if (exit) {
-        usedExitsShort.add(exit.orderId);
-        const exitPrice = parseFloat(exit.cummulativeQuoteQty) / parseFloat(exit.executedQty) || parseFloat(exit.price);
-        const pnlPct    = ((entryPrice - exitPrice) / entryPrice) * 100;  // SHORT: profit when price falls
-        trades.push({
-          symbol, direction: 'SHORT',
-          openTime: sell.time, closeTime: exit.time,
-          entryPrice, exitPrice, qty, pnlPct,
-          outcome: pnlPct >= 0 ? 'WIN' : 'LOSS',
-        });
-      } else {
-        trades.push({
-          symbol, direction: 'SHORT',
-          openTime: sell.time, closeTime: null,
           entryPrice, exitPrice: null, qty,
           pnlPct: null, outcome: 'OPEN',
         });
@@ -584,7 +551,9 @@ function renderTrades(trades) {
       day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit',
       timeZone: 'Asia/Dubai'
     });
-    const side     = `<span class="tag tag-long">LONG</span>`;
+    const side = t.direction === 'LONG'
+      ? '<span class="tag tag-long">LONG</span>'
+      : '<span class="tag tag-short">SHORT</span>';
     const out      = t.outcome === 'WIN'  ? '<span class="tag tag-win">WIN</span>'
                    : t.outcome === 'LOSS' ? '<span class="tag tag-loss">LOSS</span>'
                    : '<span class="tag tag-open">OPEN</span>';
