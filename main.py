@@ -6,13 +6,11 @@ import sys, io, logging, os, time, hmac, hashlib, requests
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
-from flask_cors import CORS
 
 load_dotenv()
 
 # ── Flask proxy app ──────────────────────────────────────────────────────────
 app = Flask(__name__)
-CORS(app)   # ← AFTER app is created, not before
 
 BINANCE_BASE = 'https://testnet.binance.vision/api'
 API_KEY    = os.environ.get('BINANCE_API_KEY', '')
@@ -26,20 +24,32 @@ def binance_signed(path, params={}):
     url = f'{BINANCE_BASE}{path}?{qs}&signature={sig}'
     return requests.get(url, headers={'X-MBX-APIKEY': API_KEY}).json()
 
+
 @app.route('/proxy/v3/account')
 def proxy_v3_account():
     return jsonify(binance_signed('/v3/account'))
 
+
 @app.route('/proxy/v3/openOrders')
 def proxy_v3_open_orders():
     return jsonify(binance_signed('/v3/openOrders'))
+
 
 @app.route('/proxy/v3/allOrders')
 def proxy_v3_all_orders():
     sym = request.args.get('symbol', '')
     return jsonify(binance_signed('/v3/allOrders', {'symbol': sym, 'limit': 100}))
 
-# ── NO @app.after_request cors function — flask_cors handles it ──────────────
+@app.after_request
+def cors(r):
+    r.headers['Access-Control-Allow-Origin'] = '*'
+    return r
+    
+@app.route('/proxy/trades')
+def proxy_trades():
+    if manager and manager.closed_positions:
+        return jsonify([p.__dict__ for p in manager.closed_positions])
+    return jsonify([])
 
 # ── Windows UTF-8 fix ────────────────────────────────────────────────────────
 if sys.platform == 'win32':
@@ -61,6 +71,8 @@ logging.basicConfig(
     ]
 )
 log = logging.getLogger('main')
+# Suppress werkzeug HTTP access logs — add this right here
+logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
 from step1_candle_engine   import CandleEngine, SYMBOLS, TESTNET
 from step2_signal_detector import SignalDetector, SignalEvent
@@ -69,14 +81,17 @@ from step4_telegram        import AlertManager
 
 detector = engine = manager = alerts = None
 
+
 def candle_callback(symbol, candle, indicators):
     candle_list = engine.store.get_list(symbol)
     detector.set_candle_list(symbol, candle_list)
     detector.on_candle_close(symbol, candle, indicators)
 
+
 def on_signal_with_alert(signal):
     if alerts:  alerts.on_signal(signal)
     if manager: manager.on_signal(signal)
+
 
 def main():
     global detector, engine, manager, alerts
@@ -130,8 +145,10 @@ def main():
         log.info("Bot stopped by user.")
         if alerts: alerts.on_error("Bot stopped by user (KeyboardInterrupt)")
 
+
 if __name__ == '__main__':
     import threading
+    # Run bot in background thread, Flask in main thread
     t = threading.Thread(target=main, daemon=True)
     t.start()
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))

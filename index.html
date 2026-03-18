@@ -168,8 +168,8 @@
   <div class="header-right">
     <span class="last-upd" id="lastUpd">--</span>
     <select class="refresh-sel" id="refreshRate" onchange="setAutoRefresh()">
-      <option value="0">No auto-refresh</option>
-      <option value="30" selected>Every 30s</option>
+      <option value="0" selected>No auto-refresh</option>
+      <option value="30">Every 30s</option>
       <option value="60">Every 1m</option>
       <option value="300">Every 5m</option>
     </select>
@@ -347,6 +347,7 @@ async function loadAll() {
 // ── Balances ─────────────────────────────────────────────────────────────────
 async function loadBalances() {
   const data   = await signedGet('/v3/account');
+  if (!data || !data.balances) return;
   const assets = data.balances.filter(b => parseFloat(b.free) + parseFloat(b.locked) > 1);
   assets.sort((a,b) => {
     if (a.asset==='USDT') return -1;
@@ -427,6 +428,7 @@ async function loadTrades() {
 
   results.forEach(r => {
     if (r.status !== 'fulfilled' || !r.value || !r.value.length) return;
+    if (!Array.isArray(r.value)) return;
 
     const filled = r.value
       .filter(o => o.status === 'FILLED' || o.status === 'PARTIALLY_FILLED')
