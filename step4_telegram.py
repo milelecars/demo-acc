@@ -1,20 +1,10 @@
 """
 STEP 4 OF 4 — Telegram Alerts + Daily P&L Summary
 ===================================================
-Sends Telegram messages for:
-  - Every signal detected (with entry, SL, TP)
-  - Every trade closed (WIN or LOSS, with P&L)
-  - Daily summary at 00:00 UTC (total trades, win rate, P&L)
-  - Bot startup confirmation
-  - Any critical errors
-
-Setup:
-  Add to your .env file:
-    TELEGRAM_TOKEN=your_bot_token_here
-    TELEGRAM_CHAT_ID=your_chat_id_here
-
-Dependencies:
-  pip install requests python-dotenv  (already installed)
+Changes in this version:
+  - Daily summary now fires at 00:00 UTC+4 (20:00 UTC) instead of 00:00 UTC
+  - Date calculation fixed — correctly reads trades from the day that just ended
+    in UAE time, not UTC
 """
 
 import os
@@ -25,10 +15,9 @@ import time
 import logging
 import threading
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 
-# Windows UTF-8 fix
 if sys.platform == 'win32':
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -49,27 +38,21 @@ TELEGRAM_TOKEN   = os.getenv('TELEGRAM_TOKEN',   '')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '')
 TRADE_LOG_FILE   = 'trade_log.csv'
 
-# Daily summary time: 00:00 UTC
-DAILY_SUMMARY_HOUR   = 0
+# Daily summary fires at 20:00 UTC = 00:00 UAE (UTC+4)
+DAILY_SUMMARY_HOUR   = 20
 DAILY_SUMMARY_MINUTE = 0
+
 
 # ============================================================================
 # TELEGRAM SENDER
 # ============================================================================
 
 class TelegramBot:
-    """
-    Thin wrapper around the Telegram sendMessage API.
-    All sends are non-blocking (dispatched to a thread).
-    Failed sends are logged but never crash the bot.
-    """
 
     def __init__(self):
         self.token   = TELEGRAM_TOKEN
         self.chat_id = TELEGRAM_CHAT_ID
         self.base    = f"https://api.telegram.org/bot{self.token}"
-        self._queue  = []
-        self._lock   = threading.Lock()
 
         if not self.token or not self.chat_id:
             log.warning("Telegram not configured — add TELEGRAM_TOKEN and "
@@ -80,7 +63,6 @@ class TelegramBot:
             log.info("Telegram alerts enabled")
 
     def send(self, text: str):
-        """Send a message. Non-blocking — fires and forgets."""
         if not self.enabled:
             return
         t = threading.Thread(target=self._send_sync, args=(text,), daemon=True)
@@ -103,7 +85,6 @@ class TelegramBot:
             log.warning(f"Telegram error: {e}")
 
     def test(self) -> bool:
-        """Send a test message. Returns True if successful."""
         if not self.enabled:
             return False
         try:
@@ -123,28 +104,10 @@ class TelegramBot:
 
 
 # ============================================================================
-# ALERT FORMATTER
+# ALERT MANAGER
 # ============================================================================
 
 class AlertManager:
-    """
-    Formats and sends all bot alerts via Telegram.
-    Plug into the bot by setting callbacks on detector and order manager.
-
-    Usage:
-        alerts = AlertManager()
-        alerts.send_startup(len(SYMBOLS))
-
-        # Wire into detector signal:
-        original_on_signal = manager.on_signal
-        def signal_with_alert(sig):
-            alerts.on_signal(sig)
-            original_on_signal(sig)
-        detector.on_signal = signal_with_alert
-
-        # Wire into order manager close:
-        alerts.set_order_manager(manager)
-    """
 
     def __init__(self):
         self.bot = TelegramBot()
@@ -172,23 +135,17 @@ class AlertManager:
     # ── Signal detected ───────────────────────────────────────────────────────
 
     def on_signal(self, signal):
-        """Called when a new signal is detected (before order is placed)."""
         direction_emoji = "LONG" if signal.direction == 'LONG' else "SHORT"
-
-        if signal.strategy == 'S1_EMA_CROSS':
-            strategy_label = "EMA 9/26 Cross"
-        else:
-            strategy_label = "MA44 Bounce"
-
+        strategy_label  = "EMA 9/26 Cross" if signal.strategy == 'S1_EMA_CROSS' else "MA44 Bounce"
         sl_pct = abs(signal.sl_price - signal.entry_price) / signal.entry_price * 100
         tp_pct = abs(signal.tp_price - signal.entry_price) / signal.entry_price * 100
 
         msg = (
             f"<b>Signal: {direction_emoji} {signal.symbol}</b>\n"
             f"Strategy : {strategy_label}\n"
-            f"Entry    : {signal.entry_price:.4f}\n"
-            f"SL       : {signal.sl_price:.4f}  (-{sl_pct:.2f}%)\n"
-            f"TP       : {signal.tp_price:.4f}  (+{tp_pct:.2f}%)\n"
+            f"Entry    : {signal.entry_price:.6f}\n"
+            f"SL       : {signal.sl_price:.6f}  (-{sl_pct:.2f}%)\n"
+            f"TP       : {signal.tp_price:.6f}  (+{tp_pct:.2f}%)\n"
             f"Time     : {signal.signal_time}"
         )
         self.bot.send(msg)
@@ -205,10 +162,10 @@ class AlertManager:
         msg = (
             f"<b>Trade Opened: {direction_emoji} {symbol}</b>\n"
             f"Strategy : {strategy}\n"
-            f"Entry    : {entry:.4f}\n"
+            f"Entry    : {entry:.6f}\n"
             f"Qty      : {qty}\n"
-            f"SL       : {sl:.4f}  ({sl_pct:.2f}%)\n"
-            f"TP       : {tp:.4f}  ({tp_pct:.2f}%)\n"
+            f"SL       : {sl:.6f}  ({sl_pct:.2f}%)\n"
+            f"TP       : {tp:.6f}  ({tp_pct:.2f}%)\n"
             f"Time     : {_now()}"
         )
         self.bot.send(msg)
@@ -218,28 +175,22 @@ class AlertManager:
     def on_trade_closed(self, symbol: str, strategy: str, direction: str,
                         entry: float, exit_price: float, outcome: str):
         if outcome == 'WIN':
-            emoji  = "WIN"
             header = f"<b>Trade WIN: {symbol}</b>"
         elif outcome == 'LOSS':
-            emoji  = "LOSS"
             header = f"<b>Trade LOSS: {symbol}</b>"
         else:
-            emoji  = "??"
             header = f"<b>Trade Closed: {symbol}</b>"
 
-        if direction == 'LONG':
-            pnl_pct = (exit_price - entry) / entry * 100
-        else:
-            pnl_pct = (entry - exit_price) / entry * 100
-
+        pnl_pct = (exit_price - entry) / entry * 100 if direction == 'LONG' \
+                  else (entry - exit_price) / entry * 100
         pnl_str = f"{pnl_pct:+.2f}%"
 
         msg = (
             f"{header}\n"
             f"Strategy : {strategy}\n"
             f"Direction: {direction}\n"
-            f"Entry    : {entry:.4f}\n"
-            f"Exit     : {exit_price:.4f}\n"
+            f"Entry    : {entry:.6f}\n"
+            f"Exit     : {exit_price:.6f}\n"
             f"P&L      : {pnl_str}\n"
             f"Time     : {_now()}"
         )
@@ -252,28 +203,31 @@ class AlertManager:
         msg = f"<b>Bot Error</b>\n{message}\nTime: {_now()}"
         self.bot.send(msg)
 
-    # ── Daily summary ─────────────────────────────────────────────────────────
+    # ── Daily summary loop ────────────────────────────────────────────────────
 
     def _daily_summary_loop(self):
-        """Runs forever, sends a summary at 00:00 UTC each day."""
+        """
+        Fires at 20:00 UTC every day = 00:00 UAE (UTC+4).
+        Summarises the day that just ended in UAE time.
+        """
         log.info("Daily summary thread started")
         while True:
             now = datetime.now(tz=timezone.utc)
-            # Seconds until next 00:00 UTC
-            next_midnight = now.replace(
+
+            # Next 20:00 UTC
+            next_trigger = now.replace(
                 hour=DAILY_SUMMARY_HOUR,
                 minute=DAILY_SUMMARY_MINUTE,
                 second=5,
                 microsecond=0
             )
-            if next_midnight <= now:
-                # Already past midnight today — aim for tomorrow
-                from datetime import timedelta
-                next_midnight += timedelta(days=1)
+            if next_trigger <= now:
+                next_trigger += timedelta(days=1)
 
-            wait_sec = (next_midnight - now).total_seconds()
+            wait_sec = (next_trigger - now).total_seconds()
             log.info(f"Daily summary scheduled in {wait_sec/3600:.1f}h "
-                     f"({next_midnight.strftime('%Y-%m-%d %H:%M UTC')})")
+                     f"({next_trigger.strftime('%Y-%m-%d %H:%M UTC')} = "
+                     f"{(next_trigger + timedelta(hours=4)).strftime('%H:%M')} UAE)")
             time.sleep(wait_sec)
 
             try:
@@ -282,50 +236,64 @@ class AlertManager:
                 log.error(f"Daily summary error: {e}", exc_info=True)
 
     def _send_daily_summary(self):
-        """Reads trade_log.csv and summarises today's trades."""
-        today = datetime.now(tz=timezone.utc).strftime('%Y-%m-%d')
-        # Yesterday's date (summary runs at 00:00 so we summarise the day that just ended)
-        from datetime import timedelta
-        yesterday = (datetime.now(tz=timezone.utc) - timedelta(days=1)).strftime('%Y-%m-%d')
+        """
+        Reads trade_log.csv and summarises trades that closed yesterday in UAE time.
+
+        We fire at 20:00 UTC = 00:00 UAE. At that point:
+          - "now" in UAE = 00:00 on the new day
+          - "yesterday" in UAE = the day that just ended
+        """
+        now_uae       = datetime.now(tz=timezone.utc) + timedelta(hours=4)
+        yesterday_uae = (now_uae - timedelta(days=1)).strftime('%Y-%m-%d')
 
         trades = []
         try:
             with open(TRADE_LOG_FILE, newline='', encoding='utf-8') as f:
                 reader = csv.DictReader(f)
                 for row in reader:
-                    if row.get('close_time', '').startswith(yesterday):
-                        trades.append(row)
+                    close_raw = row.get('close_time', '')
+                    if not close_raw:
+                        continue
+                    # close_time format: "2026-03-17 12:15 UTC"
+                    # Convert to UAE and check if it falls on yesterday_uae
+                    try:
+                        close_dt_utc = datetime.strptime(
+                            close_raw.replace(' UTC', ''), '%Y-%m-%d %H:%M'
+                        ).replace(tzinfo=timezone.utc)
+                        close_dt_uae = close_dt_utc + timedelta(hours=4)
+                        if close_dt_uae.strftime('%Y-%m-%d') == yesterday_uae:
+                            trades.append(row)
+                    except ValueError:
+                        continue
         except FileNotFoundError:
             log.info("No trade log found yet — skipping daily summary")
             return
 
         if not trades:
             msg = (
-                f"<b>Daily Summary — {yesterday}</b>\n"
+                f"<b>Daily Summary — {yesterday_uae} (UAE)</b>\n"
                 f"No trades closed yesterday."
             )
             self.bot.send(msg)
             return
 
-        total   = len(trades)
-        wins    = sum(1 for t in trades if t['outcome'] == 'WIN')
-        losses  = sum(1 for t in trades if t['outcome'] == 'LOSS')
-        wr      = wins / total * 100 if total > 0 else 0
+        total  = len(trades)
+        wins   = sum(1 for t in trades if t['outcome'] == 'WIN')
+        losses = sum(1 for t in trades if t['outcome'] == 'LOSS')
+        wr     = wins / total * 100 if total > 0 else 0
 
         try:
             total_pnl = sum(float(t['pnl_pct']) for t in trades)
         except (ValueError, KeyError):
             total_pnl = 0.0
 
-        # Strategy breakdown
         s1_trades = [t for t in trades if 'EMA' in t.get('strategy', '')]
         s2_trades = [t for t in trades if 'MA44' in t.get('strategy', '')]
-
         s1_w = sum(1 for t in s1_trades if t['outcome'] == 'WIN')
         s2_w = sum(1 for t in s2_trades if t['outcome'] == 'WIN')
 
         msg = (
-            f"<b>Daily Summary — {yesterday}</b>\n"
+            f"<b>Daily Summary — {yesterday_uae} (UAE)</b>\n"
             f"\n"
             f"Total trades : {total}\n"
             f"Wins         : {wins}\n"
@@ -366,8 +334,6 @@ if __name__ == '__main__':
     print("""
 +------------------------------------------------------+
 |  STEP 4 -- Telegram Alerts  (connectivity test)      |
-|                                                      |
-|  Sends a test message to your Telegram bot.          |
 +------------------------------------------------------+
 """)
 
@@ -376,7 +342,7 @@ if __name__ == '__main__':
         print("Add to your .env file:")
         print("  TELEGRAM_TOKEN=your_bot_token")
         print("  TELEGRAM_CHAT_ID=your_chat_id")
-        sys.exit(1)
+        import sys; sys.exit(1)
 
     bot = TelegramBot()
 
@@ -388,9 +354,8 @@ if __name__ == '__main__':
         print("  [OK] Test message sent! Check your Telegram.")
     else:
         print("  [FAIL] Could not send message. Check token and chat ID.")
-        sys.exit(1)
+        import sys; sys.exit(1)
 
-    # Also send a sample signal alert
     from step2_signal_detector import SignalEvent
     alerts = AlertManager()
 

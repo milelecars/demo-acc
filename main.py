@@ -44,6 +44,12 @@ def proxy_v3_all_orders():
 def cors(r):
     r.headers['Access-Control-Allow-Origin'] = 'https://milelecars.github.io'
     return r
+    
+@app.route('/proxy/trades')
+def proxy_trades():
+    if manager and manager.closed_positions:
+        return jsonify([p.__dict__ for p in manager.closed_positions])
+    return jsonify([])
 
 # ── Windows UTF-8 fix ────────────────────────────────────────────────────────
 if sys.platform == 'win32':
