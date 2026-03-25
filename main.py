@@ -40,6 +40,12 @@ def proxy_v3_all_orders():
     sym = request.args.get('symbol', '')
     return jsonify(binance_signed('/v3/allOrders', {'symbol': sym, 'limit': 100}))
 
+@app.route('/proxy/v3/ticker/price')
+def proxy_v3_ticker_price():
+    sym = request.args.get('symbol', '')
+    url = f'{BINANCE_BASE}/v3/ticker/price?symbol={sym}'
+    return jsonify(requests.get(url).json())
+
 @app.after_request
 def cors(r):
     r.headers['Access-Control-Allow-Origin'] = '*'
@@ -112,7 +118,7 @@ def main():
     detector = SignalDetector()
 
     try:
-        manager = OrderManager(detector=detector)
+        manager = OrderManager(detector=detector, alerts=alerts)
     except ValueError as e:
         log.error(str(e)); sys.exit(1)
 

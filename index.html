@@ -498,6 +498,26 @@ async function loadTrades() {
     });
   });
 
+  // ── Fetch live prices for open trades and calc unrealized P&L ────────────
+  const openTrades = trades.filter(t => t.outcome === 'OPEN');
+  if (openTrades.length > 0) {
+    const uniqueSymbols = [...new Set(openTrades.map(t => t.symbol))];
+    await Promise.allSettled(uniqueSymbols.map(async sym => {
+      try {
+        const ticker = await signedGet('/v3/ticker/price', {symbol: sym});
+        const livePrice = parseFloat(ticker.price);
+        trades.forEach(t => {
+          if (t.symbol === sym && t.outcome === 'OPEN') {
+            t.livePrice = livePrice;
+            t.pnlPct = t.direction === 'LONG'
+              ? ((livePrice - t.entryPrice) / t.entryPrice) * 100
+              : ((t.entryPrice - livePrice) / t.entryPrice) * 100;
+          }
+        });
+      } catch(e) { /* skip if price fetch fails */ }
+    }));
+  }
+
   allTrades = trades.sort((a, b) => b.openTime - a.openTime);
   updateStats();
   applyFilters();
@@ -588,11 +608,17 @@ function renderTrades(trades) {
                    : '<span class="tag tag-open">OPEN</span>';
     const exitCell = t.exitPrice != null
       ? `<span class="mono">${fmtP(t.exitPrice)}</span>`
-      : `<span style="color:var(--muted)">--</span>`;
+      : t.livePrice != null
+        ? `<span class="mono" title="live price">${fmtP(t.livePrice)} <span style="font-size:9px;color:var(--muted)">live</span></span>`
+        : `<span style="color:var(--muted)">--</span>`;
     const pnlCell  = t.pnlPct != null
-      ? t.pnlPct >= 0
-        ? `<span class="pnl-pos">+${t.pnlPct.toFixed(2)}%</span>`
-        : `<span class="pnl-neg">${t.pnlPct.toFixed(2)}%</span>`
+      ? t.outcome === 'OPEN'
+        ? t.pnlPct >= 0
+          ? `<span class="pnl-pos">+${t.pnlPct.toFixed(2)}% <span style="font-size:9px;font-weight:400">unrlzd</span></span>`
+          : `<span class="pnl-neg">${t.pnlPct.toFixed(2)}% <span style="font-size:9px;font-weight:400">unrlzd</span></span>`
+        : t.pnlPct >= 0
+          ? `<span class="pnl-pos">+${t.pnlPct.toFixed(2)}%</span>`
+          : `<span class="pnl-neg">${t.pnlPct.toFixed(2)}%</span>`
       : `<span class="pnl-neu">--</span>`;
 
     return `<tr>

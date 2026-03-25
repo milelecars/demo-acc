@@ -250,7 +250,7 @@ class OpenPosition:
 
 class OrderManager:
 
-    def __init__(self, detector=None):
+    def __init__(self, detector=None, alerts=None):
         if not API_KEY or not API_SECRET:
             raise ValueError(
                 "API keys not found. Create a .env file with:\n"
@@ -259,6 +259,7 @@ class OrderManager:
             )
 
         self.detector  = detector
+        self.alerts    = alerts
         self.client    = BinanceClient(API_KEY, API_SECRET, BASE_URL)
         self.precision = PrecisionCache(self.client)
 
@@ -360,13 +361,33 @@ class OrderManager:
             log.info(f"[ORDER] Placing OCO {oco_side} | TP={tp_price:.6f} "
                      f"SL={sl_price:.6f} SL_limit={sl_limit:.6f}")
 
-            oco_result  = self.client.place_oco_order(
-                symbol, oco_side, qty, tp_price, sl_price, sl_limit
-            )
-            oco_list_id = oco_result['orderListId']
-
-            log.info(f"[ORDER] OCO placed | listId={oco_list_id} | "
-                     f"TP={tp_price:.6f} SL={sl_price:.6f}")
+            try:
+                oco_result  = self.client.place_oco_order(
+                    symbol, oco_side, qty, tp_price, sl_price, sl_limit
+                )
+                oco_list_id = oco_result['orderListId']
+                log.info(f"[ORDER] OCO placed | listId={oco_list_id} | "
+                         f"TP={tp_price:.6f} SL={sl_price:.6f}")
+            except Exception as oco_err:
+                # OCO failed AFTER entry already filled — close immediately at market
+                log.error(f"[ORDER] OCO failed for {symbol}: {oco_err} — "
+                          f"closing position at market to avoid orphaned trade")
+                try:
+                    self.client.place_market_order(symbol, oco_side, qty)
+                    log.info(f"[ORDER] Emergency market close sent: {symbol} "
+                             f"{oco_side} qty={qty}")
+                    if self.alerts:
+                        self.alerts.on_error(f"OCO failed for {symbol} — emergency "
+                                        f"market close sent. Check position manually.")
+                except Exception as close_err:
+                    log.error(f"[ORDER] Emergency close also failed for {symbol}: "
+                              f"{close_err} — MANUAL INTERVENTION REQUIRED")
+                    if self.alerts:
+                        self.alerts.on_error(f"URGENT: {symbol} entry filled but OCO AND "
+                                        f"emergency close both failed. Manual close needed!")
+                with self._lock:
+                    self._global_trade_open = False
+                return
 
             position = OpenPosition(
                 symbol         = symbol,
