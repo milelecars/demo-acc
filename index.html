@@ -416,8 +416,8 @@ async function loadOpenOrders() {
 
 // ── Trade pairing logic ───────────────────────────────────────────────────────
 // MARKET orders = entries, non-MARKET = exits (OCO legs)
-// LONG: MARKET BUY entry → SELL exit
-// SHORT: MARKET SELL entry → BUY exit
+// LONG:  MARKET BUY  entry → SELL exit (LIMIT_MAKER = TP, STOP_LOSS_LIMIT = SL)
+// SHORT: MARKET SELL entry → BUY  exit (LIMIT_MAKER = TP, STOP_LOSS_LIMIT = SL)
 async function loadTrades() {
   const results = await Promise.allSettled(
     WATCH_SYMS.map(sym =>
@@ -435,33 +435,62 @@ async function loadTrades() {
       .filter(o => o.status === 'FILLED' || o.status === 'PARTIALLY_FILLED')
       .sort((a, b) => a.time - b.time);
 
-    // ── LONG trades ───────────────────────────────────────────────────────
-    // Only process BUY entries (bot is LONG only on testnet)
-    const entries_long = filled.filter(o => o.side === 'BUY' && o.type === 'MARKET');
-    const exits_long   = filled.filter(o => o.side === 'SELL');  // any SELL = exit
-    const usedExits    = new Set();
+    // ── LONG trades: MARKET BUY entry → SELL exit ─────────────────────────
+    const entries_long = filled.filter(o => o.side === 'BUY'  && o.type === 'MARKET');
+    const exits_long   = filled.filter(o => o.side === 'SELL' && o.type !== 'MARKET');
+    const usedExitsL   = new Set();
 
-    entries_long.forEach(buy => {
-      const symbol     = buy.symbol;
-      const entryPrice = parseFloat(buy.cummulativeQuoteQty) / parseFloat(buy.executedQty) || parseFloat(buy.price);
-      const qty        = parseFloat(buy.executedQty);
-
-      const exit = exits_long.find(e => e.time > buy.time && !usedExits.has(e.orderId));
+    entries_long.forEach(entry => {
+      const symbol     = entry.symbol;
+      const entryPrice = parseFloat(entry.cummulativeQuoteQty) / parseFloat(entry.executedQty) || parseFloat(entry.price);
+      const qty        = parseFloat(entry.executedQty);
+      const exit       = exits_long.find(e => e.time > entry.time && !usedExitsL.has(e.orderId));
 
       if (exit) {
-        usedExits.add(exit.orderId);
+        usedExitsL.add(exit.orderId);
         const exitPrice = parseFloat(exit.cummulativeQuoteQty) / parseFloat(exit.executedQty) || parseFloat(exit.price);
         const pnlPct    = ((exitPrice - entryPrice) / entryPrice) * 100;
         trades.push({
           symbol, direction: 'LONG',
-          openTime: buy.time, closeTime: exit.time,
+          openTime: entry.time, closeTime: exit.time,
           entryPrice, exitPrice, qty, pnlPct,
           outcome: pnlPct >= 0 ? 'WIN' : 'LOSS',
         });
       } else {
         trades.push({
           symbol, direction: 'LONG',
-          openTime: buy.time, closeTime: null,
+          openTime: entry.time, closeTime: null,
+          entryPrice, exitPrice: null, qty,
+          pnlPct: null, outcome: 'OPEN',
+        });
+      }
+    });
+
+    // ── SHORT trades: MARKET SELL entry → BUY exit ────────────────────────
+    const entries_short = filled.filter(o => o.side === 'SELL' && o.type === 'MARKET');
+    const exits_short   = filled.filter(o => o.side === 'BUY'  && o.type !== 'MARKET');
+    const usedExitsS    = new Set();
+
+    entries_short.forEach(entry => {
+      const symbol     = entry.symbol;
+      const entryPrice = parseFloat(entry.cummulativeQuoteQty) / parseFloat(entry.executedQty) || parseFloat(entry.price);
+      const qty        = parseFloat(entry.executedQty);
+      const exit       = exits_short.find(e => e.time > entry.time && !usedExitsS.has(e.orderId));
+
+      if (exit) {
+        usedExitsS.add(exit.orderId);
+        const exitPrice = parseFloat(exit.cummulativeQuoteQty) / parseFloat(exit.executedQty) || parseFloat(exit.price);
+        const pnlPct    = ((entryPrice - exitPrice) / entryPrice) * 100;  // inverted for SHORT
+        trades.push({
+          symbol, direction: 'SHORT',
+          openTime: entry.time, closeTime: exit.time,
+          entryPrice, exitPrice, qty, pnlPct,
+          outcome: pnlPct >= 0 ? 'WIN' : 'LOSS',
+        });
+      } else {
+        trades.push({
+          symbol, direction: 'SHORT',
+          openTime: entry.time, closeTime: null,
           entryPrice, exitPrice: null, qty,
           pnlPct: null, outcome: 'OPEN',
         });
