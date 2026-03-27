@@ -111,12 +111,13 @@ class AlertManager:
 
     def __init__(self):
         self.bot = TelegramBot()
-        self._daily_thread = threading.Thread(
-            target=self._daily_summary_loop,
-            daemon=True,
-            name='daily_summary'
-        )
-        self._daily_thread.start()
+        self.bot.enabled = False
+        # self._daily_thread = threading.Thread(
+        #     target=self._daily_summary_loop,
+        #     daemon=True,
+        #     name='daily_summary'
+        # )
+        # self._daily_thread.start()
 
     # ── Startup ───────────────────────────────────────────────────────────────
 
