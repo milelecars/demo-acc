@@ -256,7 +256,7 @@
           <table>
             <thead>
               <tr>
-                <th onclick="sortBy('openTime')">Time</th>
+                <th onclick="sortBy('openTime')">Opened / Closed</th>
                 <th onclick="sortBy('symbol')">Symbol</th>
                 <th onclick="sortBy('direction')">Side</th>
                 <th onclick="sortBy('entryPrice')">Entry</th>
@@ -596,10 +596,14 @@ function renderTrades(trades) {
   }
 
   tbody.innerHTML = trades.map(t => {
-    const ts = new Date(t.openTime).toLocaleString('en-GB', {
+    const fmtTs = ms => new Date(ms).toLocaleString('en-GB', {
       day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit',
       timeZone: 'Asia/Dubai'
     });
+    const openTs  = fmtTs(t.openTime);
+    const closeTs = t.closeTime
+      ? `<div style="color:var(--muted);font-size:11px;margin-top:2px">${fmtTs(t.closeTime)}</div>`
+      : `<div style="color:var(--muted);font-size:11px;margin-top:2px">—</div>`;
     const side = t.direction === 'LONG'
       ? '<span class="tag tag-long">LONG</span>'
       : '<span class="tag tag-short">SHORT</span>';
@@ -622,7 +626,7 @@ function renderTrades(trades) {
       : `<span class="pnl-neu">--</span>`;
 
     return `<tr>
-      <td style="color:var(--muted);font-size:12px;font-family:var(--mono)">${ts}</td>
+      <td style="color:var(--muted);font-size:12px;font-family:var(--mono)">${openTs}${closeTs}</td>
       <td class="mono"><strong>${t.symbol.replace('USDT','')}</strong><span style="color:var(--muted)">/USDT</span></td>
       <td>${side}</td>
       <td class="mono">${fmtP(t.entryPrice)}</td>
