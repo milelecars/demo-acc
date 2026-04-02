@@ -45,6 +45,66 @@ TRADE_USDT     = 20.0
 POLL_INTERVAL  = 15
 TRADE_LOG_FILE = 'trade_log.csv'
 
+SUPABASE_URL = os.getenv('SUPABASE_URL', '')
+SUPABASE_KEY = os.getenv('SUPABASE_KEY', '')
+
+
+# ============================================================================
+# SUPABASE CLIENT
+# ============================================================================
+
+class SupabaseClient:
+    """
+    Thin wrapper around Supabase REST API.
+    Uses only the `requests` library — no extra SDK needed.
+    Silently logs errors so a Supabase outage never crashes the bot.
+    """
+
+    def __init__(self, url: str, key: str):
+        self._url     = url.rstrip('/')
+        self._headers = {
+            'apikey':        key,
+            'Authorization': f'Bearer {key}',
+            'Content-Type':  'application/json',
+            'Prefer':        'return=minimal',
+        }
+        self._ok = bool(url and key)
+        if not self._ok:
+            log.warning("Supabase credentials not set — trade history will not persist")
+
+    def insert(self, table: str, row: dict):
+        if not self._ok:
+            return
+        try:
+            resp = requests.post(
+                f"{self._url}/rest/v1/{table}",
+                json=row,
+                headers=self._headers,
+                timeout=10,
+            )
+            if resp.status_code not in (200, 201):
+                log.warning(f"Supabase insert failed {resp.status_code}: {resp.text[:200]}")
+        except Exception as e:
+            log.warning(f"Supabase insert error: {e}")
+
+    def select_all(self, table: str) -> list:
+        if not self._ok:
+            return []
+        try:
+            headers = dict(self._headers)
+            headers['Prefer'] = 'count=none'
+            resp = requests.get(
+                f"{self._url}/rest/v1/{table}?select=*&order=id.asc",
+                headers=headers,
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            log.warning(f"Supabase select failed {resp.status_code}: {resp.text[:200]}")
+        except Exception as e:
+            log.warning(f"Supabase select error: {e}")
+        return []
+
 
 # ============================================================================
 # BINANCE REST CLIENT
@@ -262,10 +322,15 @@ class OrderManager:
         self.alerts    = alerts
         self.client    = BinanceClient(API_KEY, API_SECRET, BASE_URL)
         self.precision = PrecisionCache(self.client)
+        self.supabase  = SupabaseClient(SUPABASE_URL, SUPABASE_KEY)
 
         self._lock               = threading.Lock()
-        self._open_positions     = {}   # symbol -> OpenPosition (trade live, OCO active)
-        self._pending_symbols    = set() # symbols currently being processed (entry placed, OCO not yet confirmed)
+        self._open_positions     = {}
+        self._pending_symbols    = set()
+
+        # In-memory history — loaded from Supabase on startup
+        self.closed_positions = []
+        self._load_supabase_history()
 
         self._monitor_thread = threading.Thread(
             target=self._monitor_loop, daemon=True, name='pos_monitor'
@@ -482,6 +547,13 @@ class OrderManager:
                     'signal_time', 'oco_list_id'
                 ])
 
+    def _load_supabase_history(self):
+        """Load closed trades from Supabase into memory on startup."""
+        rows = self.supabase.select_all('trades')
+        self.closed_positions = rows
+        if rows:
+            log.info(f"Loaded {len(rows)} historical trades from Supabase")
+
     def _log_trade_open(self, pos: OpenPosition):
         log.info(f"[LOG] Trade opened: {pos.symbol} {pos.strategy} {pos.direction} "
                  f"entry={pos.entry_price:.6f} SL={pos.sl_price:.6f} TP={pos.tp_price:.6f} "
@@ -501,14 +573,36 @@ class OrderManager:
         else:
             pnl_pct = 0.0
 
+        row = {
+            'open_time':   pos.open_time,
+            'close_time':  close_time,
+            'symbol':      pos.symbol,
+            'strategy':    pos.strategy,
+            'direction':   pos.direction,
+            'entry_price': round(pos.entry_price, 8),
+            'sl_price':    round(pos.sl_price, 8),
+            'tp_price':    round(pos.tp_price, 8),
+            'quantity':    pos.quantity,
+            'outcome':     outcome,
+            'pnl_pct':     round(pnl_pct, 3),
+            'signal_time': pos.signal_time,
+            'oco_list_id': str(pos.oco_list_id),
+        }
+
+        # Write to Supabase (persistent)
+        self.supabase.insert('trades', row)
+
+        # Append to in-memory list (for /proxy/trades endpoint)
+        self.closed_positions.append(row)
+
+        # Also write to local CSV as a fallback
         with open(TRADE_LOG_FILE, 'a', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow([
-                pos.open_time, close_time, pos.symbol, pos.strategy,
-                pos.direction, f"{pos.entry_price:.8f}",
-                f"{pos.sl_price:.8f}", f"{pos.tp_price:.8f}",
-                pos.quantity, outcome, f"{pnl_pct:.3f}",
-                pos.signal_time, pos.oco_list_id
+                row['open_time'], row['close_time'], row['symbol'], row['strategy'],
+                row['direction'], row['entry_price'], row['sl_price'], row['tp_price'],
+                row['quantity'], row['outcome'], row['pnl_pct'],
+                row['signal_time'], row['oco_list_id'],
             ])
 
         log.info(f"[LOG] Trade closed: {pos.symbol} {outcome} PnL={pnl_pct:+.3f}%")
