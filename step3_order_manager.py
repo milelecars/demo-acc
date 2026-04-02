@@ -264,8 +264,8 @@ class OrderManager:
         self.precision = PrecisionCache(self.client)
 
         self._lock               = threading.Lock()
-        self._open_positions     = {}
-        self._global_trade_open  = False
+        self._open_positions     = {}   # symbol -> OpenPosition (trade live, OCO active)
+        self._pending_symbols    = set() # symbols currently being processed (entry placed, OCO not yet confirmed)
 
         self._monitor_thread = threading.Thread(
             target=self._monitor_loop, daemon=True, name='pos_monitor'
@@ -300,13 +300,13 @@ class OrderManager:
         strategy  = signal.strategy
 
         with self._lock:
-            if self._global_trade_open:
-                log.info(f"[SKIP] {symbol} {strategy}: trade already open globally")
-                return
             if symbol in self._open_positions:
                 log.info(f"[SKIP] {symbol}: already has open position")
                 return
-            self._global_trade_open = True
+            if symbol in self._pending_symbols:
+                log.info(f"[SKIP] {symbol}: entry already in progress")
+                return
+            self._pending_symbols.add(symbol)
 
         log.info(f"[ORDER] Processing signal: {symbol} {strategy} {direction} "
                  f"entry~{signal.entry_price:.6f}")
@@ -320,12 +320,14 @@ class OrderManager:
 
             if qty < prec['min_qty']:
                 log.warning(f"[SKIP] {symbol}: qty {qty} < min_qty {prec['min_qty']}")
-                self._global_trade_open = False
+                with self._lock:
+                    self._pending_symbols.discard(symbol)
                 return
 
             if qty * current_price < prec['min_notional']:
                 log.warning(f"[SKIP] {symbol}: notional too small")
-                self._global_trade_open = False
+                with self._lock:
+                    self._pending_symbols.discard(symbol)
                 return
 
             entry_side   = 'BUY' if direction == 'LONG' else 'SELL'
@@ -386,7 +388,7 @@ class OrderManager:
                         self.alerts.on_error(f"URGENT: {symbol} entry filled but OCO AND "
                                         f"emergency close both failed. Manual close needed!")
                 with self._lock:
-                    self._global_trade_open = False
+                    self._pending_symbols.discard(symbol)
                 return
 
             position = OpenPosition(
@@ -405,13 +407,14 @@ class OrderManager:
 
             with self._lock:
                 self._open_positions[symbol] = position
+                self._pending_symbols.discard(symbol)
 
             self._log_trade_open(position)
 
         except Exception as e:
             log.error(f"[ORDER] Failed to place trade for {symbol}: {e}", exc_info=True)
             with self._lock:
-                self._global_trade_open = False
+                self._pending_symbols.discard(symbol)
 
     # ── Position monitor ──────────────────────────────────────────────────────
 
@@ -446,7 +449,6 @@ class OrderManager:
 
                 with self._lock:
                     self._open_positions.pop(pos.symbol, None)
-                    self._global_trade_open = False
 
                 if self.detector:
                     self.detector.on_trade_closed(pos.symbol, pos.strategy, outcome)
