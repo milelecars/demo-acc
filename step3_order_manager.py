@@ -44,9 +44,7 @@ TESTNET    = os.getenv('TESTNET', 'true').lower() == 'true'
 
 # Futures endpoints
 if TESTNET:
-    BASE_URL = "https://testnet.binancefuture.com/fapi"
-else:
-    BASE_URL = "https://fapi.binance.com/fapi"
+    BASE_URL = "https://demo-fapi.binance.com/fapi"
 
 # Strategy-specific trade sizing
 STRATEGY_CONFIG = {
