@@ -1,14 +1,16 @@
 """
-STEP 3 OF 4 — Order Manager
-=============================
-Receives SignalEvents from Step 2 (SignalDetector).
-Places trades on Binance Testnet via REST API.
-Monitors open positions and reports outcomes back to Step 2.
-
+STEP 3 OF 4 — Order Manager  (Futures Edition)
+================================================
 Changes in this version:
-  - Fixed scientific notation bug (e.g. 3.175e-05) for low-price coins like FLOKI, SHIB, PEPE
-  - _fmt_price() ensures all prices sent to Binance are plain decimal strings
-  - Same fix applied to quantity formatting in market orders
+  - Switched from Binance Spot to Binance USDT-M Futures (testnet & live)
+  - Isolated margin mode per trade
+  - Strategy-specific sizing:
+      S1 (EMA Cross)    → $400 margin at 50x leverage
+      S2 (MA44 Bounce)  → $333 margin at 15x leverage
+  - Global cap: max 10 open positions at once (new signals ignored above limit)
+  - Consecutive-loss counters per strategy exposed for dashboard
+  - pnl_usdt stored alongside pnl_pct in trade log
+  - Fixed scientific notation bug (_fmt_price) retained from previous version
 """
 
 import os
@@ -39,27 +41,34 @@ load_dotenv()
 API_KEY    = os.getenv('BINANCE_API_KEY', '')
 API_SECRET = os.getenv('BINANCE_API_SECRET', os.getenv('BINANCE_SECRET', ''))
 TESTNET    = os.getenv('TESTNET', 'true').lower() == 'true'
-BASE_URL   = "https://testnet.binance.vision/api" if TESTNET else "https://api.binance.com/api"
 
-TRADE_USDT     = 20.0
-POLL_INTERVAL  = 15
-TRADE_LOG_FILE = 'trade_log.csv'
+# Futures endpoints
+if TESTNET:
+    BASE_URL = "https://testnet.binancefuture.com/fapi"
+else:
+    BASE_URL = "https://fapi.binance.com/fapi"
+
+# Strategy-specific trade sizing
+STRATEGY_CONFIG = {
+    'S1': {'margin_usdt': 400.0, 'leverage': 50},   # EMA Cross
+    'S2': {'margin_usdt': 333.0, 'leverage': 15},   # MA44 Bounce
+}
+DEFAULT_MARGIN  = 400.0
+DEFAULT_LEVERAGE = 50
+
+MAX_OPEN_POSITIONS = 10
+POLL_INTERVAL      = 15
+TRADE_LOG_FILE     = 'trade_log.csv'
 
 SUPABASE_URL = os.getenv('SUPABASE_URL', '')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY', '')
 
 
 # ============================================================================
-# SUPABASE CLIENT
+# SUPABASE CLIENT  (unchanged)
 # ============================================================================
 
 class SupabaseClient:
-    """
-    Thin wrapper around Supabase REST API.
-    Uses only the `requests` library — no extra SDK needed.
-    Silently logs errors so a Supabase outage never crashes the bot.
-    """
-
     def __init__(self, url: str, key: str):
         self._url     = url.rstrip('/')
         self._headers = {
@@ -107,7 +116,7 @@ class SupabaseClient:
 
 
 # ============================================================================
-# BINANCE REST CLIENT
+# BINANCE FUTURES REST CLIENT
 # ============================================================================
 
 class BinanceClient:
@@ -120,15 +129,8 @@ class BinanceClient:
         self.session.headers.update({'X-MBX-APIKEY': api_key})
 
     def _fmt_price(self, value: float) -> str:
-        """
-        Format a float as a plain decimal string.
-        Binance rejects scientific notation (e.g. 3.175e-05).
-        Works for both prices and quantities.
-        """
-        # Use enough decimal places to capture small values like 0.00003175
-        formatted = f'{value:.10f}'
-        # Strip trailing zeros but keep at least one decimal place
-        formatted = formatted.rstrip('0')
+        """Format float as plain decimal — Binance rejects scientific notation."""
+        formatted = f'{value:.10f}'.rstrip('0')
         if formatted.endswith('.'):
             formatted += '0'
         return formatted
@@ -166,71 +168,110 @@ class BinanceClient:
         resp.raise_for_status()
         return resp.json()
 
+    # ── Futures-specific helpers ──────────────────────────────────────────────
+
+    def set_leverage(self, symbol: str, leverage: int) -> dict:
+        """Set leverage for a symbol (Futures only)."""
+        return self._post('/v1/leverage', {
+            'symbol':   symbol,
+            'leverage': leverage,
+        })
+
+    def set_margin_type(self, symbol: str, margin_type: str = 'ISOLATED') -> dict:
+        """Set margin type to ISOLATED or CROSSED (Futures only)."""
+        try:
+            return self._post('/v1/marginType', {
+                'symbol':     symbol,
+                'marginType': margin_type,
+            })
+        except Exception as e:
+            # Binance returns error -4046 if already set to requested type — ignore it
+            if '-4046' in str(e):
+                log.debug(f"{symbol}: margin type already {margin_type}")
+                return {}
+            raise
+
     def get_symbol_info(self, symbol: str) -> dict:
-        info = self._get('/v3/exchangeInfo', {'symbol': symbol})
+        info = self._get('/v1/exchangeInfo')
         for s in info.get('symbols', []):
             if s['symbol'] == symbol:
                 return s
         return {}
 
     def get_ticker_price(self, symbol: str) -> float:
-        data = self._get('/v3/ticker/price', {'symbol': symbol})
+        data = self._get('/v1/ticker/price', {'symbol': symbol})
         return float(data['price'])
 
     def get_account(self) -> dict:
-        return self._get('/v3/account', {}, signed=True)
+        return self._get('/v2/account', {}, signed=True)
 
     def get_usdt_balance(self) -> float:
         account = self.get_account()
-        for b in account.get('balances', []):
-            if b['asset'] == 'USDT':
-                return float(b['free'])
+        for a in account.get('assets', []):
+            if a['asset'] == 'USDT':
+                return float(a['availableBalance'])
         return 0.0
 
-    def place_market_order(self, symbol: str, side: str, quantity: float) -> dict:
-        """Place a MARKET order. Quantity is formatted to avoid scientific notation."""
+    def place_market_order(self, symbol: str, side: str, quantity: float,
+                           reduce_only: bool = False) -> dict:
         params = {
             'symbol':   symbol,
             'side':     side,
             'type':     'MARKET',
-            'quantity': self._fmt_price(quantity),   # ← fixed: no scientific notation
+            'quantity': self._fmt_price(quantity),
         }
-        return self._post('/v3/order', params)
+        if reduce_only:
+            params['reduceOnly'] = 'true'
+        return self._post('/v1/order', params)
 
-    def place_oco_order(self, symbol: str, side: str,
-                        quantity: float, tp_price: float,
-                        sl_price: float, sl_limit_price: float) -> dict:
-        """
-        Place an OCO order for SL + TP.
-        All prices formatted as plain decimals — Binance rejects scientific notation.
-        """
+    def place_take_profit_order(self, symbol: str, side: str,
+                                quantity: float, tp_price: float) -> dict:
+        """TAKE_PROFIT_MARKET order for futures."""
         params = {
-            'symbol':               symbol,
-            'side':                 side,
-            'quantity':             self._fmt_price(quantity),        # ← fixed
-            'price':                self._fmt_price(tp_price),        # ← fixed
-            'stopPrice':            self._fmt_price(sl_price),        # ← fixed
-            'stopLimitPrice':       self._fmt_price(sl_limit_price),  # ← fixed
-            'stopLimitTimeInForce': 'GTC',
-            'listClientOrderId':    f"bot_{symbol}_{int(time.time())}",
+            'symbol':    symbol,
+            'side':      side,
+            'type':      'TAKE_PROFIT_MARKET',
+            'quantity':  self._fmt_price(quantity),
+            'stopPrice': self._fmt_price(tp_price),
+            'reduceOnly': 'true',
         }
-        return self._post('/v3/order/oco', params)
+        return self._post('/v1/order', params)
 
-    def get_oco_status(self, order_list_id: int) -> dict:
-        return self._get('/v3/orderList', {'orderListId': order_list_id}, signed=True)
+    def place_stop_loss_order(self, symbol: str, side: str,
+                              quantity: float, sl_price: float) -> dict:
+        """STOP_MARKET order for futures."""
+        params = {
+            'symbol':    symbol,
+            'side':      side,
+            'type':      'STOP_MARKET',
+            'quantity':  self._fmt_price(quantity),
+            'stopPrice': self._fmt_price(sl_price),
+            'reduceOnly': 'true',
+        }
+        return self._post('/v1/order', params)
 
-    def cancel_oco(self, symbol: str, order_list_id: int) -> dict:
-        return self._delete('/v3/orderList', {
-            'symbol':      symbol,
-            'orderListId': order_list_id,
-        })
+    def cancel_order(self, symbol: str, order_id: int) -> dict:
+        return self._delete('/v1/order', {'symbol': symbol, 'orderId': order_id})
 
     def get_order(self, symbol: str, order_id: int) -> dict:
-        return self._get('/v3/order', {'symbol': symbol, 'orderId': order_id}, signed=True)
+        return self._get('/v1/order', {'symbol': symbol, 'orderId': order_id}, signed=True)
+
+    def get_open_orders(self, symbol: str = None) -> list:
+        params = {}
+        if symbol:
+            params['symbol'] = symbol
+        return self._get('/v1/openOrders', params, signed=True)
+
+    def get_position(self, symbol: str) -> dict:
+        """Get current futures position for a symbol."""
+        data = self._get('/v2/positionRisk', {'symbol': symbol}, signed=True)
+        if isinstance(data, list) and data:
+            return data[0]
+        return {}
 
 
 # ============================================================================
-# SYMBOL PRECISION HELPER
+# SYMBOL PRECISION HELPER  (Futures version)
 # ============================================================================
 
 class PrecisionCache:
@@ -262,7 +303,7 @@ class PrecisionCache:
             'price_step':     float(tick.get('tickSize', '0.01')),
             'price_decimals': _decimals(tick.get('tickSize', '0.01')),
             'min_qty':        float(lot.get('minQty', '0.001')),
-            'min_notional':   float(notional.get('minNotional', '10')),
+            'min_notional':   float(notional.get('minNotional', '5')),
         }
 
         with self._lock:
@@ -288,8 +329,9 @@ class OpenPosition:
 
     def __init__(self, symbol, strategy, direction,
                  entry_price, sl_price, tp_price,
-                 quantity, oco_list_id, entry_order_id,
-                 signal_ts, signal_time):
+                 quantity, margin_usdt, leverage,
+                 tp_order_id, sl_order_id,
+                 entry_order_id, signal_ts, signal_time):
         self.symbol         = symbol
         self.strategy       = strategy
         self.direction      = direction
@@ -297,11 +339,15 @@ class OpenPosition:
         self.sl_price       = sl_price
         self.tp_price       = tp_price
         self.quantity       = quantity
-        self.oco_list_id    = oco_list_id
+        self.margin_usdt    = margin_usdt
+        self.leverage       = leverage
+        self.tp_order_id    = tp_order_id
+        self.sl_order_id    = sl_order_id
         self.entry_order_id = entry_order_id
         self.signal_ts      = signal_ts
         self.signal_time    = signal_time
         self.open_time      = datetime.now(tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+        self.open_ts        = int(time.time() * 1000)  # ms timestamp for duration calc
 
 
 # ============================================================================
@@ -325,8 +371,11 @@ class OrderManager:
         self.supabase  = SupabaseClient(SUPABASE_URL, SUPABASE_KEY)
 
         self._lock               = threading.Lock()
-        self._open_positions     = {}
+        self._open_positions     = {}      # symbol → OpenPosition
         self._pending_symbols    = set()
+
+        # Consecutive loss counters per strategy (for dashboard + S2 pause logic)
+        self._consec_losses      = {'S1': 0, 'S2': 0}
 
         # In-memory history — loaded from Supabase on startup
         self.closed_positions = []
@@ -339,14 +388,49 @@ class OrderManager:
 
         self._init_csv()
 
-        log.info(f"OrderManager ready | Testnet={TESTNET} | "
-                 f"Trade size={TRADE_USDT} USDT/trade")
+        log.info(f"OrderManager ready | Futures | Testnet={TESTNET} | "
+                 f"Max positions={MAX_OPEN_POSITIONS}")
 
         try:
             bal = self.client.get_usdt_balance()
-            log.info(f"Testnet USDT balance: {bal:.2f}")
+            log.info(f"Futures wallet USDT balance: {bal:.2f}")
         except Exception as e:
             log.error(f"Could not fetch balance — check API keys: {e}")
+
+    # ── Public stats for dashboard ────────────────────────────────────────────
+
+    def get_open_positions_list(self) -> list:
+        """Return a JSON-serialisable list of open positions with duration info."""
+        now_ms = int(time.time() * 1000)
+        result = []
+        with self._lock:
+            for pos in self._open_positions.values():
+                elapsed_s = (now_ms - pos.open_ts) // 1000
+                hours, rem = divmod(elapsed_s, 3600)
+                mins       = rem // 60
+                duration   = f"{hours}h {mins:02d}m" if hours else f"{mins}m"
+                result.append({
+                    'symbol':       pos.symbol,
+                    'strategy':     pos.strategy,
+                    'direction':    pos.direction,
+                    'entry_price':  pos.entry_price,
+                    'sl_price':     pos.sl_price,
+                    'tp_price':     pos.tp_price,
+                    'quantity':     pos.quantity,
+                    'margin_usdt':  pos.margin_usdt,
+                    'leverage':     pos.leverage,
+                    'open_time':    pos.open_time,
+                    'open_ts':      pos.open_ts,
+                    'duration':     duration,
+                })
+        return result
+
+    def get_stats(self) -> dict:
+        """Return strategy-level stats for dashboard."""
+        return {
+            'consec_losses': dict(self._consec_losses),
+            'open_count':    len(self._open_positions),
+        }
 
     # ── Signal handler ────────────────────────────────────────────────────────
 
@@ -365,23 +449,46 @@ class OrderManager:
         strategy  = signal.strategy
 
         with self._lock:
+            # Global position cap
+            total_open = len(self._open_positions) + len(self._pending_symbols)
+            if total_open >= MAX_OPEN_POSITIONS:
+                log.info(f"[SKIP] {symbol}: max open positions ({MAX_OPEN_POSITIONS}) reached")
+                return
+
             if symbol in self._open_positions:
                 log.info(f"[SKIP] {symbol}: already has open position")
                 return
             if symbol in self._pending_symbols:
                 log.info(f"[SKIP] {symbol}: entry already in progress")
                 return
+
+            # S2 pause after 2 consecutive losses
+            if strategy == 'S2' and self._consec_losses.get('S2', 0) >= 2:
+                log.info(f"[SKIP] S2 paused after {self._consec_losses['S2']} consecutive losses")
+                return
+
             self._pending_symbols.add(symbol)
 
         log.info(f"[ORDER] Processing signal: {symbol} {strategy} {direction} "
                  f"entry~{signal.entry_price:.6f}")
 
+        cfg      = STRATEGY_CONFIG.get(strategy, {'margin_usdt': DEFAULT_MARGIN,
+                                                   'leverage':    DEFAULT_LEVERAGE})
+        margin   = cfg['margin_usdt']
+        leverage = cfg['leverage']
+
         try:
+            # Set isolated margin + leverage before placing any order
+            self.client.set_margin_type(symbol, 'ISOLATED')
+            self.client.set_leverage(symbol, leverage)
+
             current_price = self.client.get_ticker_price(symbol)
             prec          = self.precision.get(symbol)
 
-            raw_qty = TRADE_USDT / current_price
-            qty     = self.precision.round_qty(symbol, raw_qty)
+            # Notional = margin × leverage; qty = notional / price
+            notional  = margin * leverage
+            raw_qty   = notional / current_price
+            qty       = self.precision.round_qty(symbol, raw_qty)
 
             if qty < prec['min_qty']:
                 log.warning(f"[SKIP] {symbol}: qty {qty} < min_qty {prec['min_qty']}")
@@ -389,25 +496,16 @@ class OrderManager:
                     self._pending_symbols.discard(symbol)
                 return
 
-            if qty * current_price < prec['min_notional']:
-                log.warning(f"[SKIP] {symbol}: notional too small")
-                with self._lock:
-                    self._pending_symbols.discard(symbol)
-                return
-
-            entry_side   = 'BUY' if direction == 'LONG' else 'SELL'
-            log.info(f"[ORDER] Placing {entry_side} MARKET {qty} {symbol} @ ~{current_price:.6f}")
+            entry_side = 'BUY' if direction == 'LONG' else 'SELL'
+            log.info(f"[ORDER] Placing {entry_side} MARKET {qty} {symbol} @ ~{current_price:.6f} "
+                     f"[{strategy} margin=${margin} lev={leverage}x]")
 
             entry_result   = self.client.place_market_order(symbol, entry_side, qty)
             entry_order_id = entry_result['orderId']
 
-            fills = entry_result.get('fills', [])
-            if fills:
-                total_qty    = sum(float(f['qty'])   for f in fills)
-                total_cost   = sum(float(f['qty']) * float(f['price']) for f in fills)
-                actual_entry = total_cost / total_qty if total_qty > 0 else current_price
-            else:
-                actual_entry = current_price
+            # Derive actual fill price
+            avg_price = float(entry_result.get('avgPrice', 0) or 0)
+            actual_entry = avg_price if avg_price > 0 else current_price
 
             log.info(f"[ORDER] Entry filled: {entry_side} {qty} {symbol} @ {actual_entry:.6f} "
                      f"(order #{entry_order_id})")
@@ -418,43 +516,16 @@ class OrderManager:
             sl_price = self.precision.round_price(symbol, actual_entry * sl_pct)
             tp_price = self.precision.round_price(symbol, actual_entry * tp_pct)
 
-            if direction == 'LONG':
-                sl_limit = self.precision.round_price(symbol, sl_price * 0.999)
-            else:
-                sl_limit = self.precision.round_price(symbol, sl_price * 1.001)
+            exit_side = 'SELL' if direction == 'LONG' else 'BUY'
 
-            oco_side = 'SELL' if direction == 'LONG' else 'BUY'
+            tp_result = self.client.place_take_profit_order(symbol, exit_side, qty, tp_price)
+            sl_result = self.client.place_stop_loss_order(symbol, exit_side, qty, sl_price)
 
-            log.info(f"[ORDER] Placing OCO {oco_side} | TP={tp_price:.6f} "
-                     f"SL={sl_price:.6f} SL_limit={sl_limit:.6f}")
+            tp_order_id = tp_result['orderId']
+            sl_order_id = sl_result['orderId']
 
-            try:
-                oco_result  = self.client.place_oco_order(
-                    symbol, oco_side, qty, tp_price, sl_price, sl_limit
-                )
-                oco_list_id = oco_result['orderListId']
-                log.info(f"[ORDER] OCO placed | listId={oco_list_id} | "
-                         f"TP={tp_price:.6f} SL={sl_price:.6f}")
-            except Exception as oco_err:
-                # OCO failed AFTER entry already filled — close immediately at market
-                log.error(f"[ORDER] OCO failed for {symbol}: {oco_err} — "
-                          f"closing position at market to avoid orphaned trade")
-                try:
-                    self.client.place_market_order(symbol, oco_side, qty)
-                    log.info(f"[ORDER] Emergency market close sent: {symbol} "
-                             f"{oco_side} qty={qty}")
-                    if self.alerts:
-                        self.alerts.on_error(f"OCO failed for {symbol} — emergency "
-                                        f"market close sent. Check position manually.")
-                except Exception as close_err:
-                    log.error(f"[ORDER] Emergency close also failed for {symbol}: "
-                              f"{close_err} — MANUAL INTERVENTION REQUIRED")
-                    if self.alerts:
-                        self.alerts.on_error(f"URGENT: {symbol} entry filled but OCO AND "
-                                        f"emergency close both failed. Manual close needed!")
-                with self._lock:
-                    self._pending_symbols.discard(symbol)
-                return
+            log.info(f"[ORDER] TP order #{tp_order_id} @ {tp_price:.6f} | "
+                     f"SL order #{sl_order_id} @ {sl_price:.6f}")
 
             position = OpenPosition(
                 symbol         = symbol,
@@ -464,7 +535,10 @@ class OrderManager:
                 sl_price       = sl_price,
                 tp_price       = tp_price,
                 quantity       = qty,
-                oco_list_id    = oco_list_id,
+                margin_usdt    = margin,
+                leverage       = leverage,
+                tp_order_id    = tp_order_id,
+                sl_order_id    = sl_order_id,
                 entry_order_id = entry_order_id,
                 signal_ts      = signal.signal_ts,
                 signal_time    = signal.signal_time,
@@ -498,13 +572,26 @@ class OrderManager:
 
         for pos in positions:
             try:
-                oco    = self.client.get_oco_status(pos.oco_list_id)
-                status = oco.get('listStatusType', '')
+                # Check if TP or SL order has filled
+                tp_order = self.client.get_order(pos.symbol, pos.tp_order_id)
+                sl_order = self.client.get_order(pos.symbol, pos.sl_order_id)
 
-                if status != 'ALL_DONE':
+                tp_filled = tp_order.get('status') in ('FILLED', 'PARTIALLY_FILLED')
+                sl_filled = sl_order.get('status') in ('FILLED', 'PARTIALLY_FILLED')
+
+                if not tp_filled and not sl_filled:
                     continue
 
-                outcome = self._determine_outcome(oco, pos)
+                outcome = 'WIN' if tp_filled else 'LOSS'
+
+                # Cancel the other leg
+                try:
+                    if tp_filled:
+                        self.client.cancel_order(pos.symbol, pos.sl_order_id)
+                    else:
+                        self.client.cancel_order(pos.symbol, pos.tp_order_id)
+                except Exception as ce:
+                    log.warning(f"Could not cancel remaining order for {pos.symbol}: {ce}")
 
                 log.info(f"[CLOSED] {pos.symbol} {pos.strategy} {pos.direction} | "
                          f"outcome={outcome} | entry={pos.entry_price:.6f} "
@@ -514,25 +601,18 @@ class OrderManager:
 
                 with self._lock:
                     self._open_positions.pop(pos.symbol, None)
+                    # Update consecutive loss counter
+                    strat = pos.strategy
+                    if outcome == 'WIN':
+                        self._consec_losses[strat] = 0
+                    else:
+                        self._consec_losses[strat] = self._consec_losses.get(strat, 0) + 1
 
                 if self.detector:
                     self.detector.on_trade_closed(pos.symbol, pos.strategy, outcome)
 
             except Exception as e:
-                log.warning(f"Could not check position {pos.symbol} "
-                            f"(oco#{pos.oco_list_id}): {e}")
-
-    def _determine_outcome(self, oco_response: dict, pos: OpenPosition) -> str:
-        orders = oco_response.get('orders', [])
-        for order in orders:
-            order_detail = self.client.get_order(pos.symbol, order['orderId'])
-            if order_detail.get('status') == 'FILLED':
-                order_type = order_detail.get('type', '')
-                if order_type in ('LIMIT_MAKER', 'LIMIT'):
-                    return 'WIN'
-                else:
-                    return 'LOSS'
-        return 'UNKNOWN'
+                log.warning(f"Could not check position {pos.symbol}: {e}")
 
     # ── CSV trade log ─────────────────────────────────────────────────────────
 
@@ -543,12 +623,11 @@ class OrderManager:
                 writer.writerow([
                     'open_time', 'close_time', 'symbol', 'strategy',
                     'direction', 'entry_price', 'sl_price', 'tp_price',
-                    'quantity', 'outcome', 'pnl_pct',
-                    'signal_time', 'oco_list_id'
+                    'quantity', 'margin_usdt', 'leverage', 'outcome',
+                    'pnl_pct', 'pnl_usdt', 'signal_time',
                 ])
 
     def _load_supabase_history(self):
-        """Load closed trades from Supabase into memory on startup."""
         rows = self.supabase.select_all('trades')
         self.closed_positions = rows
         if rows:
@@ -557,7 +636,7 @@ class OrderManager:
     def _log_trade_open(self, pos: OpenPosition):
         log.info(f"[LOG] Trade opened: {pos.symbol} {pos.strategy} {pos.direction} "
                  f"entry={pos.entry_price:.6f} SL={pos.sl_price:.6f} TP={pos.tp_price:.6f} "
-                 f"qty={pos.quantity}")
+                 f"qty={pos.quantity} margin=${pos.margin_usdt} lev={pos.leverage}x")
 
     def _log_trade_close(self, pos: OpenPosition, outcome: str):
         close_time = datetime.now(tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
@@ -573,6 +652,10 @@ class OrderManager:
         else:
             pnl_pct = 0.0
 
+        # USDT P&L based on margin × leverage × pnl%
+        notional = pos.margin_usdt * pos.leverage
+        pnl_usdt = notional * (pnl_pct / 100)
+
         row = {
             'open_time':   pos.open_time,
             'close_time':  close_time,
@@ -583,29 +666,28 @@ class OrderManager:
             'sl_price':    round(pos.sl_price, 8),
             'tp_price':    round(pos.tp_price, 8),
             'quantity':    pos.quantity,
+            'margin_usdt': pos.margin_usdt,
+            'leverage':    pos.leverage,
             'outcome':     outcome,
             'pnl_pct':     round(pnl_pct, 3),
+            'pnl_usdt':    round(pnl_usdt, 2),
             'signal_time': pos.signal_time,
-            'oco_list_id': str(pos.oco_list_id),
         }
 
-        # Write to Supabase (persistent)
         self.supabase.insert('trades', row)
-
-        # Append to in-memory list (for /proxy/trades endpoint)
         self.closed_positions.append(row)
 
-        # Also write to local CSV as a fallback
         with open(TRADE_LOG_FILE, 'a', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow([
                 row['open_time'], row['close_time'], row['symbol'], row['strategy'],
                 row['direction'], row['entry_price'], row['sl_price'], row['tp_price'],
-                row['quantity'], row['outcome'], row['pnl_pct'],
-                row['signal_time'], row['oco_list_id'],
+                row['quantity'], row['margin_usdt'], row['leverage'], row['outcome'],
+                row['pnl_pct'], row['pnl_usdt'], row['signal_time'],
             ])
 
-        log.info(f"[LOG] Trade closed: {pos.symbol} {outcome} PnL={pnl_pct:+.3f}%")
+        log.info(f"[LOG] Trade closed: {pos.symbol} {outcome} "
+                 f"PnL={pnl_pct:+.3f}% / ${pnl_usdt:+.2f}")
 
 
 # ============================================================================
@@ -625,7 +707,7 @@ if __name__ == '__main__':
 
     print("""
 +------------------------------------------------------+
-|  STEP 3 -- Order Manager  (connectivity test)        |
+|  STEP 3 -- Order Manager  (Futures / connectivity)  |
 |  Does NOT place any orders.                          |
 +------------------------------------------------------+
 """)
@@ -642,40 +724,29 @@ if __name__ == '__main__':
 
     try:
         bal = client.get_usdt_balance()
-        print(f"  [OK] USDT Balance    : {bal:.2f} USDT")
+        print(f"  [OK] Futures USDT Balance : {bal:.2f} USDT")
     except Exception as e:
-        print(f"  [FAIL] Balance fetch : {e}")
+        print(f"  [FAIL] Balance fetch      : {e}")
         sys.exit(1)
 
     try:
-        info = client.get_symbol_info('BTCUSDT')
-        print(f"  [OK] BTCUSDT info    : status={info.get('status')}")
-    except Exception as e:
-        print(f"  [FAIL] Symbol info   : {e}")
-
-    try:
         price = client.get_ticker_price('BTCUSDT')
-        print(f"  [OK] BTCUSDT price   : ${price:.2f}")
+        print(f"  [OK] BTCUSDT price        : ${price:.2f}")
     except Exception as e:
-        print(f"  [FAIL] Price fetch   : {e}")
+        print(f"  [FAIL] Price fetch        : {e}")
 
     try:
-        pc   = PrecisionCache(client)
-        prec = pc.get('BTCUSDT')
-        qty  = pc.round_qty('BTCUSDT', TRADE_USDT / price)
-        print(f"  [OK] Precision       : qty_step={prec['qty_step']} "
-              f"price_step={prec['price_step']}")
-        print(f"  [OK] Order qty       : {qty} BTC "
-              f"(= ~{qty*price:.2f} USDT for ${TRADE_USDT} budget)")
-
-        # Test _fmt_price with a very small number (FLOKI-like)
         test_price = 3.175e-05
         formatted  = client._fmt_price(test_price)
-        print(f"  [OK] fmt_price test  : {test_price} → '{formatted}' "
-              f"(no scientific notation)")
+        print(f"  [OK] fmt_price test       : {test_price} → '{formatted}'")
     except Exception as e:
-        print(f"  [FAIL] Precision     : {e}")
+        print(f"  [FAIL] fmt_price          : {e}")
 
     print()
+    print("  Strategy config:")
+    for strat, cfg in STRATEGY_CONFIG.items():
+        print(f"    {strat}: ${cfg['margin_usdt']} margin × {cfg['leverage']}x leverage "
+              f"= ${cfg['margin_usdt'] * cfg['leverage']:.0f} notional")
+    print(f"  Max open positions: {MAX_OPEN_POSITIONS}")
+    print()
     print("  All connectivity tests passed.")
-    print(f"  Trade size is set to {TRADE_USDT} USDT per trade.")

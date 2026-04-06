@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>BotDash — Testnet Monitor</title>
+<title>BotDash — Futures Monitor</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -32,7 +32,6 @@
   }
 
   * { margin:0; padding:0; box-sizing:border-box; }
-
   body { background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 14px; min-height: 100vh; }
 
   .header {
@@ -54,6 +53,7 @@
   .logo span { color: var(--accent); }
   .pill { font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 20px; letter-spacing: 0.6px; text-transform: uppercase; }
   .pill-testnet { background: var(--yellow-bg); color: var(--yellow); }
+  .pill-futures { background: var(--blue-bg); color: var(--blue); }
   .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px var(--green-bg); animation: breathe 2.5s ease-in-out infinite; }
   @keyframes breathe { 0%,100% { box-shadow: 0 0 0 3px var(--green-bg); } 50% { box-shadow: 0 0 0 5px var(--green-bg); } }
 
@@ -69,9 +69,39 @@
 
   .main { padding: 20px 24px; max-width: 1600px; margin: 0 auto; }
 
-  .stats-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin-bottom: 20px; }
+  /* ── Stats grid (top row: 6 cards) ── */
+  .stats-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin-bottom: 14px; }
   @media (max-width:1200px) { .stats-grid { grid-template-columns: repeat(3,1fr); } }
   @media (max-width:700px)  { .stats-grid { grid-template-columns: repeat(2,1fr); } }
+
+  /* ── Strategy breakdown row ── */
+  .strategy-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }
+  @media (max-width:700px) { .strategy-grid { grid-template-columns: 1fr; } }
+
+  .strat-card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--r);
+    padding: 14px 18px;
+    box-shadow: var(--shadow);
+    display: flex;
+    gap: 20px;
+    align-items: center;
+  }
+  .strat-badge {
+    font-size: 11px; font-weight: 700; letter-spacing: 0.8px; padding: 4px 10px;
+    border-radius: 6px; text-transform: uppercase; white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .strat-s1 { background: var(--blue-bg); color: var(--blue); }
+  .strat-s2 { background: var(--yellow-bg); color: var(--yellow); }
+  .strat-info { display: flex; gap: 24px; flex: 1; }
+  .strat-stat { display: flex; flex-direction: column; }
+  .strat-label { font-size: 10px; font-weight: 600; color: var(--muted); letter-spacing: 0.5px; text-transform: uppercase; margin-bottom: 3px; }
+  .strat-value { font-family: var(--mono); font-size: 18px; font-weight: 500; }
+  .strat-consec { font-size: 11px; margin-top: 2px; }
+  .consec-warn { color: var(--red); font-weight: 600; }
+  .consec-ok   { color: var(--muted); }
 
   .stat-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r); padding: 16px 18px; box-shadow: var(--shadow); transition: box-shadow 0.2s, transform 0.2s; }
   .stat-card:hover { box-shadow: var(--shadow-md); transform: translateY(-1px); }
@@ -118,6 +148,8 @@
   .tag-win   { background: var(--green-bg); color: var(--green); }
   .tag-loss  { background: var(--red-bg);   color: var(--red);   }
   .tag-open  { background: var(--blue-bg);  color: var(--blue);  }
+  .tag-s1    { background: var(--blue-bg);  color: var(--blue);  font-size: 9px; padding: 1px 5px; }
+  .tag-s2    { background: var(--yellow-bg);color: var(--yellow);font-size: 9px; padding: 1px 5px; }
 
   .pnl-pos { color: var(--green); font-weight: 600; font-family: var(--mono); }
   .pnl-neg { color: var(--red);   font-weight: 600; font-family: var(--mono); }
@@ -128,6 +160,29 @@
   .right-col { display: flex; flex-direction: column; gap: 16px; }
   .panel-scroll { overflow-y: auto; max-height: 280px; }
 
+  /* Open positions cards */
+  .open-positions-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; padding: 12px 18px; }
+
+  .pos-card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    transition: box-shadow 0.2s;
+  }
+  .pos-card:hover { box-shadow: var(--shadow-md); }
+  .pos-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  .pos-sym { font-weight: 700; font-size: 14px; }
+  .pos-tags { display: flex; gap: 4px; align-items: center; }
+  .pos-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 5px 12px; font-size: 12px; margin-bottom: 8px; }
+  .pos-meta-key  { color: var(--muted); }
+  .pos-meta-val  { font-family: var(--mono); font-weight: 500; }
+  .pos-prices { display: flex; gap: 14px; font-size: 12px; font-family: var(--mono); margin-top: 8px; border-top: 1px solid var(--border); padding-top: 8px; }
+  .pos-tp { color: var(--green); font-weight: 600; }
+  .pos-sl { color: var(--red); font-weight: 600; }
+  .pos-dur { font-size: 11px; color: var(--muted); font-family: var(--mono); }
+
+  /* Balances */
   .bal-row { display: flex; align-items: center; justify-content: space-between; padding: 10px 18px; border-bottom: 1px solid var(--border); transition: background 0.12s; }
   .bal-row:last-child { border-bottom: none; }
   .bal-row:hover { background: var(--bg); }
@@ -137,15 +192,6 @@
   .bal-free { font-family: var(--mono); font-weight: 500; font-size: 13px; }
   .bal-lock { font-size: 11px; color: var(--muted); margin-top: 1px; font-family: var(--mono); }
   .bal-amt  { text-align: right; }
-
-  .ord-row { padding: 12px 18px; border-bottom: 1px solid var(--border); transition: background 0.12s; }
-  .ord-row:last-child { border-bottom: none; }
-  .ord-row:hover { background: var(--bg); }
-  .ord-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
-  .ord-sym { font-weight: 700; font-size: 14px; }
-  .ord-prices { display: flex; gap: 16px; font-size: 12px; color: var(--muted); font-family: var(--mono); }
-  .ord-tp { color: var(--green); font-weight: 600; }
-  .ord-sl { color: var(--red);   font-weight: 600; }
 
   .loading { display:flex; align-items:center; gap:8px; padding:20px 18px; color:var(--muted); font-size:13px; }
   .spin { width:16px; height:16px; border:2px solid var(--border2); border-top-color:var(--accent); border-radius:50%; animation:spin 0.8s linear infinite; }
@@ -164,6 +210,9 @@
 <div class="header">
   <div class="header-left">
     <div class="logo">Bot<span>Dash</span></div>
+    <span class="pill pill-futures">FUTURES</span>
+    <span class="pill pill-testnet" id="modeLabel">TESTNET</span>
+    <div class="live-dot"></div>
   </div>
   <div class="header-right">
     <span class="last-upd" id="lastUpd">--</span>
@@ -181,16 +230,17 @@
 
 <div class="main">
 
+  <!-- ── Top stats row ── -->
   <div class="stats-grid">
     <div class="stat-card">
       <div class="stat-label">USDT Balance</div>
       <div class="stat-value c-blue" id="statUsdt">--</div>
-      <div class="stat-sub">Available free</div>
+      <div class="stat-sub">Available in wallet</div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Total Trades</div>
-      <div class="stat-value" id="statTotal">--</div>
-      <div class="stat-sub">Completed positions</div>
+      <div class="stat-label">Total P&amp;L (USDT)</div>
+      <div class="stat-value" id="statPnlUsdt">--</div>
+      <div class="stat-sub" id="statPnlPct">Cumulative closed</div>
     </div>
     <div class="stat-card">
       <div class="stat-label">Win Rate</div>
@@ -198,38 +248,89 @@
       <div class="stat-sub" id="statWRSub">Closed trades</div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Total P&L</div>
-      <div class="stat-value" id="statPnl">--</div>
-      <div class="stat-sub">vs entry price</div>
+      <div class="stat-label">Today's P&amp;L</div>
+      <div class="stat-value" id="statToday">--</div>
+      <div class="stat-sub" id="statTodaySub">UAE time</div>
     </div>
     <div class="stat-card">
       <div class="stat-label">Open Positions</div>
       <div class="stat-value c-blue" id="statOpen">--</div>
-      <div class="stat-sub">Active now</div>
+      <div class="stat-sub">of 10 max</div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Today</div>
-      <div class="stat-value" id="statToday">--</div>
-      <div class="stat-sub">Trades opened today</div>
+      <div class="stat-label">Total Trades</div>
+      <div class="stat-value" id="statTotal">--</div>
+      <div class="stat-sub">Completed positions</div>
+    </div>
+  </div>
+
+  <!-- ── Strategy breakdown ── -->
+  <div class="strategy-grid">
+    <div class="strat-card">
+      <span class="strat-badge strat-s1">S1 — EMA Cross</span>
+      <div class="strat-info">
+        <div class="strat-stat">
+          <span class="strat-label">Trades</span>
+          <span class="strat-value" id="s1Trades">--</span>
+        </div>
+        <div class="strat-stat">
+          <span class="strat-label">Win Rate</span>
+          <span class="strat-value" id="s1WR">--</span>
+        </div>
+        <div class="strat-stat">
+          <span class="strat-label">P&amp;L USDT</span>
+          <span class="strat-value" id="s1Pnl">--</span>
+        </div>
+        <div class="strat-stat">
+          <span class="strat-label">Consec. Losses</span>
+          <span class="strat-value" id="s1Consec">--</span>
+          <span class="strat-consec consec-ok" id="s1ConsecLabel"></span>
+        </div>
+      </div>
+    </div>
+    <div class="strat-card">
+      <span class="strat-badge strat-s2">S2 — MA44 Bounce</span>
+      <div class="strat-info">
+        <div class="strat-stat">
+          <span class="strat-label">Trades</span>
+          <span class="strat-value" id="s2Trades">--</span>
+        </div>
+        <div class="strat-stat">
+          <span class="strat-label">Win Rate</span>
+          <span class="strat-value" id="s2WR">--</span>
+        </div>
+        <div class="strat-stat">
+          <span class="strat-label">P&amp;L USDT</span>
+          <span class="strat-value" id="s2Pnl">--</span>
+        </div>
+        <div class="strat-stat">
+          <span class="strat-label">Consec. Losses</span>
+          <span class="strat-value" id="s2Consec">--</span>
+          <span class="strat-consec consec-ok" id="s2ConsecLabel"></span>
+        </div>
+      </div>
     </div>
   </div>
 
   <div class="main-stack">
 
-    <!-- OPEN POSITIONS -->
+    <!-- ── Open Positions ── -->
     <div class="panel">
       <div class="panel-hdr">
         <span class="panel-title">Open Positions</span>
-        <span class="count-pill" id="openCount">--</span>
+        <div style="display:flex;align-items:center;gap:10px">
+          <input class="f-input" type="text" id="openFilterSym" placeholder="Filter coin..." oninput="renderOpenPositions()" style="width:110px">
+          <span class="count-pill" id="openCount">--</span>
+        </div>
       </div>
-      <div class="panel-scroll" id="openOrdersList">
+      <div id="openOrdersList">
         <div class="loading"><div class="spin"></div>Loading...</div>
       </div>
     </div>
 
     <div class="two-col">
 
-      <!-- TRADE HISTORY -->
+      <!-- ── Trade History ── -->
       <div class="panel">
         <div class="panel-hdr">
           <span class="panel-title">Trade History</span>
@@ -248,6 +349,11 @@
             <option value="LONG">LONG</option>
             <option value="SHORT">SHORT</option>
           </select>
+          <select class="f-sel" id="filterStrat" onchange="applyFilters()">
+            <option value="">All strategies</option>
+            <option value="S1">S1</option>
+            <option value="S2">S2</option>
+          </select>
           <button class="chip active" id="chip-all"   onclick="setDate('all')">All time</button>
           <button class="chip"        id="chip-today" onclick="setDate('today')">Today</button>
           <button class="chip"        id="chip-week"  onclick="setDate('week')">7 days</button>
@@ -258,25 +364,27 @@
               <tr>
                 <th onclick="sortBy('openTime')">Opened / Closed</th>
                 <th onclick="sortBy('symbol')">Symbol</th>
+                <th onclick="sortBy('strategy')">Strat</th>
                 <th onclick="sortBy('direction')">Side</th>
                 <th onclick="sortBy('entryPrice')">Entry</th>
                 <th onclick="sortBy('exitPrice')">Exit</th>
                 <th onclick="sortBy('outcome')">Result</th>
-                <th onclick="sortBy('pnlPct')">P&L %</th>
+                <th onclick="sortBy('pnlUsdt')">P&amp;L $</th>
+                <th onclick="sortBy('pnlPct')">P&amp;L %</th>
               </tr>
             </thead>
             <tbody id="tradeBody">
-              <tr><td colspan="7"><div class="empty">Loading trades...</div></td></tr>
+              <tr><td colspan="9"><div class="empty">Loading trades...</div></td></tr>
             </tbody>
           </table>
         </div>
       </div>
 
-      <!-- BALANCES -->
+      <!-- ── Right column: Balances ── -->
       <div class="right-col">
         <div class="panel">
           <div class="panel-hdr">
-            <span class="panel-title">Balances</span>
+            <span class="panel-title">Wallet</span>
             <span class="count-pill" id="balCount">--</span>
           </div>
           <div class="panel-scroll" id="balanceList">
@@ -290,7 +398,7 @@
 </div>
 
 <div class="footer">
-  <span>BotDash — Binance Testnet Monitor</span>
+  <span>BotDash — Binance Futures Monitor</span>
   <span id="footerTime">--</span>
 </div>
 
@@ -316,24 +424,56 @@ const WATCH_SYMS = [
   'BARDUSDT','LUNCUSDT','STRKUSDT','TWTUSDT','RUNEUSDT',
 ];
 
-let allTrades  = [];
-let sortKey    = 'openTime';
-let sortAsc    = false;
-let dateFilter = 'all';
-let refreshTmr = null;
+let allTrades      = [];
+let openPositions  = [];  // from /proxy/open_positions
+let sortKey        = 'openTime';
+let sortAsc        = false;
+let dateFilter     = 'all';
+let refreshTmr     = null;
 
-async function signedGet(path, params={}) {
-  const qs  = new URLSearchParams(params).toString();
-  const url = PROXY + path + (qs ? '?' + qs : '');
+// ── Helpers ───────────────────────────────────────────────────────────────────
+async function apiFetch(url) {
   const res = await fetch(url);
   if (!res.ok) { const t = await res.text(); throw new Error(`${res.status}: ${t.slice(0,120)}`); }
   return res.json();
 }
 
+async function signedGet(path, params={}) {
+  const qs  = new URLSearchParams(params).toString();
+  const url = PROXY + path + (qs ? '?' + qs : '');
+  return apiFetch(url);
+}
+
+function fmtP(n) {
+  if (n == null || n === 0) return '--';
+  if (n >= 1000) return n.toLocaleString('en', {maximumFractionDigits:2});
+  if (n >= 1)    return n.toFixed(4);
+  return n.toFixed(6);
+}
+function fmt(n, d=4) {
+  if (!n || n === 0) return '0';
+  if (n >= 1000) return n.toLocaleString('en', {maximumFractionDigits:2});
+  return parseFloat(n).toFixed(d).replace(/\.?0+$/, '');
+}
+function fmtUsdt(n) {
+  if (n == null) return '--';
+  const abs = Math.abs(n);
+  const str = abs >= 1000 ? abs.toLocaleString('en', {maximumFractionDigits:2})
+                           : abs.toFixed(2);
+  return (n >= 0 ? '+$' : '-$') + str;
+}
+function fmtTs(ms) {
+  return new Date(ms).toLocaleString('en-GB', {
+    day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit',
+    timeZone: 'Asia/Dubai'
+  });
+}
+
+// ── Main load ─────────────────────────────────────────────────────────────────
 async function loadAll() {
   hideError();
   try {
-    await Promise.all([loadBalances(), loadOpenOrders(), loadTrades()]);
+    await Promise.all([loadBalances(), loadOpenPositions(), loadTrades(), loadBotStats()]);
     document.getElementById('lastUpd').textContent =
       'Updated ' + new Date().toLocaleString('en-GB', {
         timeZone:'Asia/Dubai', hour:'2-digit', minute:'2-digit', second:'2-digit'
@@ -344,28 +484,34 @@ async function loadAll() {
   }
 }
 
-// ── Balances ─────────────────────────────────────────────────────────────────
+// ── Balances ──────────────────────────────────────────────────────────────────
 async function loadBalances() {
-  const data   = await signedGet('/v3/account');
-  if (!data || !data.balances) return;
-  const assets = data.balances.filter(b => parseFloat(b.free) + parseFloat(b.locked) > 1);
+  // Futures account uses /v2/account; assets[] not balances[]
+  const data = await signedGet('/fapi/v2/account');
+  const assets = (data.assets || []).filter(b =>
+    parseFloat(b.walletBalance) + parseFloat(b.unrealizedProfit || 0) > 0.5
+  );
   assets.sort((a,b) => {
     if (a.asset==='USDT') return -1;
     if (b.asset==='USDT') return 1;
-    return parseFloat(b.free) - parseFloat(a.free);
+    return parseFloat(b.walletBalance) - parseFloat(a.walletBalance);
   });
 
   document.getElementById('balCount').textContent = assets.length + ' assets';
 
   const usdt = assets.find(a=>a.asset==='USDT');
-  if (usdt) document.getElementById('statUsdt').textContent =
-    '$' + parseFloat(usdt.free).toLocaleString('en', {maximumFractionDigits:2});
+  if (usdt) {
+    const free = parseFloat(usdt.availableBalance || usdt.walletBalance);
+    document.getElementById('statUsdt').textContent =
+      '$' + free.toLocaleString('en', {maximumFractionDigits:2});
+  }
 
   const list = document.getElementById('balanceList');
   if (!assets.length) { list.innerHTML = '<div class="empty">No balances</div>'; return; }
 
   list.innerHTML = assets.map(b => {
-    const free = parseFloat(b.free), locked = parseFloat(b.locked);
+    const wallet = parseFloat(b.walletBalance);
+    const upnl   = parseFloat(b.unrealizedProfit || 0);
     return `
       <div class="bal-row">
         <div class="bal-left">
@@ -373,155 +519,232 @@ async function loadBalances() {
           <div class="bal-name">${b.asset}</div>
         </div>
         <div class="bal-amt">
-          <div class="bal-free">${fmt(free,4)}</div>
-          ${locked>0?`<div class="bal-lock">${fmt(locked,4)} locked</div>`:''}
+          <div class="bal-free">${fmt(wallet,4)}</div>
+          ${Math.abs(upnl)>0.001?`<div class="bal-lock ${upnl>=0?'c-green':'c-red'}">${upnl>=0?'+':''}${upnl.toFixed(4)} uPnL</div>`:''}
         </div>
       </div>`;
   }).join('');
 }
 
-// ── Open positions ────────────────────────────────────────────────────────────
-async function loadOpenOrders() {
-  const orders = await signedGet('/v3/openOrders');
-  const uniqueSymbols = new Set(orders.map(o => o.symbol)).size;
-  document.getElementById('openCount').textContent = uniqueSymbols;
-  document.getElementById('statOpen').textContent  = uniqueSymbols;
+// ── Open Positions — from bot's in-memory tracker ────────────────────────────
+async function loadOpenPositions() {
+  try {
+    const data = await apiFetch(PROXY + '/open_positions');
+    openPositions = Array.isArray(data) ? data : [];
+  } catch(e) {
+    // fallback: try Futures positionRisk
+    openPositions = [];
+  }
+  document.getElementById('statOpen').textContent = openPositions.length;
+  renderOpenPositions();
+}
 
-  const list = document.getElementById('openOrdersList');
-  if (!orders.length) { list.innerHTML = '<div class="empty">No open positions</div>'; return; }
+function renderOpenPositions() {
+  const filterVal = (document.getElementById('openFilterSym')?.value || '').trim().toUpperCase();
+  const filtered  = filterVal
+    ? openPositions.filter(p => p.symbol.includes(filterVal))
+    : openPositions;
 
-  const bySymbol = {};
-  orders.forEach(o => { (bySymbol[o.symbol] = bySymbol[o.symbol] || []).push(o); });
+  document.getElementById('openCount').textContent = filtered.length + ' / ' + openPositions.length;
 
-  list.innerHTML = Object.entries(bySymbol).map(([sym, ords]) => {
-    const tp  = ords.find(o => o.type==='LIMIT_MAKER' || o.type==='LIMIT');
-    const sl  = ords.find(o => o.type==='STOP_LOSS_LIMIT');
-    const dir = ords[0]?.side === 'SELL' ? 'LONG' : 'SHORT';
-    return `
-      <div class="ord-row">
-        <div class="ord-top">
-          <div>
-            <span class="ord-sym">${sym.replace('USDT','')}/USDT</span>
-            <span class="tag ${dir==='LONG'?'tag-long':'tag-short'}" style="margin-left:6px">${dir}</span>
+  const container = document.getElementById('openOrdersList');
+  if (!filtered.length) {
+    container.innerHTML = `<div class="empty">${openPositions.length ? 'No positions match filter' : 'No open positions'}</div>`;
+    return;
+  }
+
+  container.innerHTML = `<div class="open-positions-grid">${
+    filtered.map(pos => {
+      const dir  = pos.direction === 'LONG'
+        ? '<span class="tag tag-long">LONG</span>'
+        : '<span class="tag tag-short">SHORT</span>';
+      const stag = pos.strategy === 'S1'
+        ? '<span class="tag tag-s1">S1</span>'
+        : '<span class="tag tag-s2">S2</span>';
+
+      return `
+        <div class="pos-card">
+          <div class="pos-top">
+            <div>
+              <span class="pos-sym">${pos.symbol.replace('USDT','')}<span style="color:var(--muted);font-weight:400">/USDT</span></span>
+            </div>
+            <div class="pos-tags">${stag} ${dir}</div>
           </div>
-          <span style="font-size:11px;color:var(--muted)">qty: ${ords[0]?.origQty}</span>
-        </div>
-        <div class="ord-prices">
-          ${tp?`<span>TP <span class="ord-tp">${fmtP(parseFloat(tp.price))}</span></span>`:''}
-          ${sl?`<span>SL <span class="ord-sl">${fmtP(parseFloat(sl.stopPrice))}</span></span>`:''}
-        </div>
-      </div>`;
-  }).join('');
+          <div class="pos-meta">
+            <span class="pos-meta-key">Entry</span>
+            <span class="pos-meta-val">${fmtP(pos.entry_price)}</span>
+            <span class="pos-meta-key">Margin</span>
+            <span class="pos-meta-val">$${pos.margin_usdt} × ${pos.leverage}x</span>
+            <span class="pos-meta-key">Qty</span>
+            <span class="pos-meta-val">${pos.quantity}</span>
+            <span class="pos-meta-key">Duration</span>
+            <span class="pos-meta-val pos-dur">${pos.duration || '--'}</span>
+          </div>
+          <div class="pos-prices">
+            <span>TP <span class="pos-tp">${fmtP(pos.tp_price)}</span></span>
+            <span>SL <span class="pos-sl">${fmtP(pos.sl_price)}</span></span>
+            <span style="margin-left:auto;color:var(--muted);font-size:11px">${pos.open_time?.replace(' UTC','') || ''}</span>
+          </div>
+        </div>`;
+    }).join('')
+  }</div>`;
 }
 
-// ── Trade pairing logic ───────────────────────────────────────────────────────
-// MARKET orders = entries, non-MARKET = exits (OCO legs)
-// LONG:  MARKET BUY  entry → SELL exit (LIMIT_MAKER = TP, STOP_LOSS_LIMIT = SL)
-// SHORT: MARKET SELL entry → BUY  exit (LIMIT_MAKER = TP, STOP_LOSS_LIMIT = SL)
+// ── Bot stats (consec losses etc.) ───────────────────────────────────────────
+async function loadBotStats() {
+  try {
+    const stats = await apiFetch(PROXY + '/stats');
+    const cl = stats.consec_losses || {};
+
+    // Update open count from stats if available
+    if (stats.open_count != null) {
+      document.getElementById('statOpen').textContent = stats.open_count;
+    }
+
+    // S1 consecutive losses
+    const s1cl = cl.S1 || 0;
+    document.getElementById('s1Consec').textContent = s1cl;
+    const s1lbl = document.getElementById('s1ConsecLabel');
+    s1lbl.textContent = s1cl >= 2 ? '⚠ Warning' : s1cl === 1 ? '1 in a row' : 'Clean';
+    s1lbl.className   = 'strat-consec ' + (s1cl >= 2 ? 'consec-warn' : 'consec-ok');
+
+    // S2 consecutive losses
+    const s2cl = cl.S2 || 0;
+    document.getElementById('s2Consec').textContent = s2cl;
+    const s2lbl = document.getElementById('s2ConsecLabel');
+    s2lbl.textContent = s2cl >= 2 ? '⛔ Paused' : s2cl === 1 ? '1 in a row' : 'Active';
+    s2lbl.className   = 'strat-consec ' + (s2cl >= 2 ? 'consec-warn' : 'consec-ok');
+  } catch(e) {
+    console.warn('Could not load bot stats:', e.message);
+  }
+}
+
+// ── Trades ────────────────────────────────────────────────────────────────────
 async function loadTrades() {
-  const results = await Promise.allSettled(
-    WATCH_SYMS.map(sym =>
-      signedGet('/v3/allOrders', {symbol: sym, limit: 100}).catch(() => [])
-    )
-  );
+  // Pull from bot's /proxy/trades (Supabase-backed list)
+  let trades = [];
+  try {
+    const data = await apiFetch(PROXY + '/trades');
+    if (Array.isArray(data) && data.length > 0) {
+      trades = data.map(t => ({
+        symbol:     t.symbol,
+        strategy:   t.strategy || '',
+        direction:  t.direction,
+        openTime:   parseTimestamp(t.open_time),
+        closeTime:  t.close_time ? parseTimestamp(t.close_time) : null,
+        entryPrice: t.entry_price,
+        exitPrice:  t.outcome === 'WIN' ? t.tp_price : t.outcome === 'LOSS' ? t.sl_price : null,
+        outcome:    t.outcome,
+        pnlPct:     t.pnl_pct ?? null,
+        pnlUsdt:    t.pnl_usdt ?? null,
+        marginUsdt: t.margin_usdt ?? null,
+        leverage:   t.leverage ?? null,
+      }));
+    }
+  } catch(e) {
+    console.warn('Could not load /proxy/trades:', e.message);
+  }
 
-  const trades = [];
-
-  results.forEach(r => {
-    if (r.status !== 'fulfilled' || !r.value || !r.value.length) return;
-    if (!Array.isArray(r.value)) return;
-
-    const filled = r.value
-      .filter(o => o.status === 'FILLED' || o.status === 'PARTIALLY_FILLED')
-      .sort((a, b) => a.time - b.time);
-
-    // ── LONG trades: MARKET BUY entry → SELL exit ─────────────────────────
-    const entries_long = filled.filter(o => o.side === 'BUY'  && o.type === 'MARKET');
-    const exits_long   = filled.filter(o => o.side === 'SELL' && o.type !== 'MARKET');
-    const usedExitsL   = new Set();
-
-    entries_long.forEach(entry => {
-      const symbol     = entry.symbol;
-      const entryPrice = parseFloat(entry.cummulativeQuoteQty) / parseFloat(entry.executedQty) || parseFloat(entry.price);
-      const qty        = parseFloat(entry.executedQty);
-      const exit       = exits_long.find(e => e.time > entry.time && !usedExitsL.has(e.orderId));
-
-      if (exit) {
-        usedExitsL.add(exit.orderId);
-        const exitPrice = parseFloat(exit.cummulativeQuoteQty) / parseFloat(exit.executedQty) || parseFloat(exit.price);
-        const pnlPct    = ((exitPrice - entryPrice) / entryPrice) * 100;
-        trades.push({
-          symbol, direction: 'LONG',
-          openTime: entry.time, closeTime: exit.time,
-          entryPrice, exitPrice, qty, pnlPct,
-          outcome: pnlPct >= 0 ? 'WIN' : 'LOSS',
-        });
-      } else {
-        trades.push({
-          symbol, direction: 'LONG',
-          openTime: entry.time, closeTime: null,
-          entryPrice, exitPrice: null, qty,
-          pnlPct: null, outcome: 'OPEN',
-        });
-      }
-    });
-
-    // ── SHORT trades: MARKET SELL entry → BUY exit ────────────────────────
-    const entries_short = filled.filter(o => o.side === 'SELL' && o.type === 'MARKET');
-    const exits_short   = filled.filter(o => o.side === 'BUY'  && o.type !== 'MARKET');
-    const usedExitsS    = new Set();
-
-    entries_short.forEach(entry => {
-      const symbol     = entry.symbol;
-      const entryPrice = parseFloat(entry.cummulativeQuoteQty) / parseFloat(entry.executedQty) || parseFloat(entry.price);
-      const qty        = parseFloat(entry.executedQty);
-      const exit       = exits_short.find(e => e.time > entry.time && !usedExitsS.has(e.orderId));
-
-      if (exit) {
-        usedExitsS.add(exit.orderId);
-        const exitPrice = parseFloat(exit.cummulativeQuoteQty) / parseFloat(exit.executedQty) || parseFloat(exit.price);
-        const pnlPct    = ((entryPrice - exitPrice) / entryPrice) * 100;  // inverted for SHORT
-        trades.push({
-          symbol, direction: 'SHORT',
-          openTime: entry.time, closeTime: exit.time,
-          entryPrice, exitPrice, qty, pnlPct,
-          outcome: pnlPct >= 0 ? 'WIN' : 'LOSS',
-        });
-      } else {
-        trades.push({
-          symbol, direction: 'SHORT',
-          openTime: entry.time, closeTime: null,
-          entryPrice, exitPrice: null, qty,
-          pnlPct: null, outcome: 'OPEN',
-        });
-      }
-    });
-  });
-
-  // ── Fetch live prices for open trades and calc unrealized P&L ────────────
-  const openTrades = trades.filter(t => t.outcome === 'OPEN');
-  if (openTrades.length > 0) {
-    const uniqueSymbols = [...new Set(openTrades.map(t => t.symbol))];
-    await Promise.allSettled(uniqueSymbols.map(async sym => {
-      try {
-        const ticker = await signedGet('/v3/ticker/price', {symbol: sym});
-        const livePrice = parseFloat(ticker.price);
-        trades.forEach(t => {
-          if (t.symbol === sym && t.outcome === 'OPEN') {
-            t.livePrice = livePrice;
-            t.pnlPct = t.direction === 'LONG'
-              ? ((livePrice - t.entryPrice) / t.entryPrice) * 100
-              : ((t.entryPrice - livePrice) / t.entryPrice) * 100;
-          }
-        });
-      } catch(e) { /* skip if price fetch fails */ }
-    }));
+  // If bot trades endpoint empty, fall back to Futures allOrders pairing
+  if (!trades.length) {
+    trades = await loadTradesFromFutures();
   }
 
   allTrades = trades.sort((a, b) => b.openTime - a.openTime);
   updateStats();
   applyFilters();
 }
+
+function parseTimestamp(s) {
+  if (!s) return 0;
+  if (typeof s === 'number') return s;
+  // "2024-01-15 14:30 UTC" or ISO
+  return new Date(s.replace(' UTC', 'Z').replace(' ', 'T')).getTime() || 0;
+}
+
+// ── Futures order pairing fallback ────────────────────────────────────────────
+async function loadTradesFromFutures() {
+  const results = await Promise.allSettled(
+    WATCH_SYMS.map(sym =>
+      signedGet('/fapi/v1/allOrders', {symbol: sym, limit: 500}).catch(() => [])
+    )
+  );
+
+  const trades = [];
+
+  results.forEach(r => {
+    if (r.status !== 'fulfilled' || !Array.isArray(r.value) || !r.value.length) return;
+
+    const filled = r.value
+      .filter(o => o.status === 'FILLED')
+      .sort((a,b) => a.time - b.time);
+
+    // LONG: BUY MARKET entry → SELL exit (TP/SL)
+    const entries_long = filled.filter(o => o.side === 'BUY'  && o.type === 'MARKET');
+    const exits_long   = filled.filter(o => o.side === 'SELL' && o.type !== 'MARKET');
+    const usedL = new Set();
+
+    entries_long.forEach(entry => {
+      const symbol     = entry.symbol;
+      const entryPrice = parseFloat(entry.avgPrice || entry.price);
+      const qty        = parseFloat(entry.executedQty);
+      const exit       = exits_long.find(e => e.time > entry.time && !usedL.has(e.orderId));
+
+      if (exit) {
+        usedL.add(exit.orderId);
+        const exitPrice = parseFloat(exit.avgPrice || exit.price);
+        const pnlPct    = ((exitPrice - entryPrice) / entryPrice) * 100;
+        trades.push({
+          symbol, direction: 'LONG', strategy: '',
+          openTime: entry.time, closeTime: exit.time,
+          entryPrice, exitPrice, qty, pnlPct, pnlUsdt: null,
+          outcome: pnlPct >= 0 ? 'WIN' : 'LOSS',
+        });
+      } else {
+        trades.push({
+          symbol, direction: 'LONG', strategy: '',
+          openTime: entry.time, closeTime: null,
+          entryPrice, exitPrice: null, qty, pnlPct: null, pnlUsdt: null,
+          outcome: 'OPEN',
+        });
+      }
+    });
+
+    // SHORT: SELL MARKET entry → BUY exit
+    const entries_short = filled.filter(o => o.side === 'SELL' && o.type === 'MARKET');
+    const exits_short   = filled.filter(o => o.side === 'BUY'  && o.type !== 'MARKET');
+    const usedS = new Set();
+
+    entries_short.forEach(entry => {
+      const symbol     = entry.symbol;
+      const entryPrice = parseFloat(entry.avgPrice || entry.price);
+      const qty        = parseFloat(entry.executedQty);
+      const exit       = exits_short.find(e => e.time > entry.time && !usedS.has(e.orderId));
+
+      if (exit) {
+        usedS.add(exit.orderId);
+        const exitPrice = parseFloat(exit.avgPrice || exit.price);
+        const pnlPct    = ((entryPrice - exitPrice) / entryPrice) * 100;
+        trades.push({
+          symbol, direction: 'SHORT', strategy: '',
+          openTime: entry.time, closeTime: exit.time,
+          entryPrice, exitPrice, qty, pnlPct, pnlUsdt: null,
+          outcome: pnlPct >= 0 ? 'WIN' : 'LOSS',
+        });
+      } else {
+        trades.push({
+          symbol, direction: 'SHORT', strategy: '',
+          openTime: entry.time, closeTime: null,
+          entryPrice, exitPrice: null, qty, pnlPct: null, pnlUsdt: null,
+          outcome: 'OPEN',
+        });
+      }
+    });
+  });
+
+  return trades;
+}
+
 // ── Stats ─────────────────────────────────────────────────────────────────────
 function updateStats() {
   const closed = allTrades.filter(t => t.outcome !== 'OPEN');
@@ -530,12 +753,7 @@ function updateStats() {
 
   document.getElementById('statTotal').textContent = closed.length;
 
-  const todayStr = new Date().toLocaleDateString('en-GB', {timeZone:'Asia/Dubai'});
-  document.getElementById('statToday').textContent =
-    allTrades.filter(t =>
-      new Date(t.openTime).toLocaleDateString('en-GB', {timeZone:'Asia/Dubai'}) === todayStr
-    ).length;
-
+  // Win rate
   if (closed.length > 0) {
     const wr = (wins.length / closed.length * 100).toFixed(1);
     const el = document.getElementById('statWR');
@@ -547,10 +765,55 @@ function updateStats() {
     document.getElementById('statWRSub').textContent = 'No closed trades yet';
   }
 
-  const totalPnl = closed.reduce((s, t) => s + (t.pnlPct || 0), 0);
-  const pel = document.getElementById('statPnl');
-  pel.textContent = (totalPnl >= 0 ? '+' : '') + totalPnl.toFixed(2) + '%';
-  pel.className   = 'stat-value ' + (totalPnl >= 0 ? 'c-green' : 'c-red');
+  // Total P&L in USDT
+  const totalPnlUsdt = closed.reduce((s,t) => s + (t.pnlUsdt || 0), 0);
+  const totalPnlPct  = closed.reduce((s,t) => s + (t.pnlPct  || 0), 0);
+  const pel = document.getElementById('statPnlUsdt');
+  pel.textContent = fmtUsdt(totalPnlUsdt);
+  pel.className   = 'stat-value ' + (totalPnlUsdt >= 0 ? 'c-green' : 'c-red');
+  document.getElementById('statPnlPct').textContent =
+    (totalPnlPct >= 0 ? '+' : '') + totalPnlPct.toFixed(2) + '% cumulative';
+
+  // Today's P&L in USDT
+  const todayStr = new Date().toLocaleDateString('en-GB', {timeZone:'Asia/Dubai'});
+  const todayTrades = closed.filter(t =>
+    new Date(t.openTime).toLocaleDateString('en-GB', {timeZone:'Asia/Dubai'}) === todayStr
+  );
+  const todayPnl = todayTrades.reduce((s,t) => s + (t.pnlUsdt || 0), 0);
+  const todayEl = document.getElementById('statToday');
+  todayEl.textContent = todayTrades.length ? fmtUsdt(todayPnl) : '$0.00';
+  todayEl.className   = 'stat-value ' + (todayPnl >= 0 ? 'c-green' : 'c-red');
+  document.getElementById('statTodaySub').textContent =
+    todayTrades.length + ' trades today · UAE time';
+
+  // Strategy breakdown
+  updateStrategyStats('S1', document.getElementById('s1Trades'),
+                           document.getElementById('s1WR'),
+                           document.getElementById('s1Pnl'));
+  updateStrategyStats('S2', document.getElementById('s2Trades'),
+                           document.getElementById('s2WR'),
+                           document.getElementById('s2Pnl'));
+}
+
+function updateStrategyStats(strat, tradesEl, wrEl, pnlEl) {
+  const stratTrades  = allTrades.filter(t => t.strategy === strat);
+  const stratClosed  = stratTrades.filter(t => t.outcome !== 'OPEN');
+  const stratWins    = stratTrades.filter(t => t.outcome === 'WIN');
+  const stratPnlUsdt = stratClosed.reduce((s,t) => s + (t.pnlUsdt || 0), 0);
+
+  tradesEl.textContent = stratClosed.length;
+
+  if (stratClosed.length > 0) {
+    const wr = (stratWins.length / stratClosed.length * 100).toFixed(0);
+    wrEl.textContent  = wr + '%';
+    wrEl.className    = 'strat-value ' + (parseFloat(wr) >= 50 ? 'c-green' : 'c-red');
+  } else {
+    wrEl.textContent = 'n/a';
+    wrEl.className   = 'strat-value';
+  }
+
+  pnlEl.textContent = stratClosed.length ? fmtUsdt(stratPnlUsdt) : '--';
+  pnlEl.className   = 'strat-value ' + (stratPnlUsdt >= 0 ? 'c-green' : 'c-red');
 }
 
 // ── Filters ───────────────────────────────────────────────────────────────────
@@ -562,16 +825,18 @@ function setDate(f) {
 }
 
 function applyFilters() {
-  const sym = document.getElementById('filterSymbol').value.trim().toUpperCase();
-  const out = document.getElementById('filterOutcome').value;
-  const dir = document.getElementById('filterDir').value;
+  const sym   = document.getElementById('filterSymbol').value.trim().toUpperCase();
+  const out   = document.getElementById('filterOutcome').value;
+  const dir   = document.getElementById('filterDir').value;
+  const strat = document.getElementById('filterStrat').value;
   const now = Date.now();
   const DAY = 86400000, WEEK = 7 * DAY;
 
   let list = allTrades.filter(t => {
-    if (sym && !t.symbol.includes(sym))                    return false;
-    if (out && t.outcome !== out)                          return false;
-    if (dir && t.direction !== dir)                        return false;
+    if (sym   && !t.symbol.includes(sym))               return false;
+    if (out   && t.outcome   !== out)                   return false;
+    if (dir   && t.direction !== dir)                   return false;
+    if (strat && t.strategy  !== strat)                 return false;
     if (dateFilter === 'today' && now - t.openTime > DAY)  return false;
     if (dateFilter === 'week'  && now - t.openTime > WEEK) return false;
     return true;
@@ -591,31 +856,39 @@ function applyFilters() {
 function renderTrades(trades) {
   const tbody = document.getElementById('tradeBody');
   if (!trades.length) {
-    tbody.innerHTML = '<tr><td colspan="7"><div class="empty">No trades match your filters</div></td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9"><div class="empty">No trades match your filters</div></td></tr>';
     return;
   }
 
   tbody.innerHTML = trades.map(t => {
-    const fmtTs = ms => new Date(ms).toLocaleString('en-GB', {
-      day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit',
-      timeZone: 'Asia/Dubai'
-    });
     const openTs  = fmtTs(t.openTime);
     const closeTs = t.closeTime
       ? `<div style="color:var(--muted);font-size:11px;margin-top:2px">${fmtTs(t.closeTime)}</div>`
       : `<div style="color:var(--muted);font-size:11px;margin-top:2px">—</div>`;
-    const side = t.direction === 'LONG'
+
+    const stag   = t.strategy === 'S1' ? '<span class="tag tag-s1">S1</span>'
+                 : t.strategy === 'S2' ? '<span class="tag tag-s2">S2</span>'
+                 : '<span style="color:var(--muted);font-size:11px">—</span>';
+    const side   = t.direction === 'LONG'
       ? '<span class="tag tag-long">LONG</span>'
       : '<span class="tag tag-short">SHORT</span>';
-    const out      = t.outcome === 'WIN'  ? '<span class="tag tag-win">WIN</span>'
-                   : t.outcome === 'LOSS' ? '<span class="tag tag-loss">LOSS</span>'
-                   : '<span class="tag tag-open">OPEN</span>';
+    const out    = t.outcome === 'WIN'  ? '<span class="tag tag-win">WIN</span>'
+                 : t.outcome === 'LOSS' ? '<span class="tag tag-loss">LOSS</span>'
+                 : '<span class="tag tag-open">OPEN</span>';
+
     const exitCell = t.exitPrice != null
       ? `<span class="mono">${fmtP(t.exitPrice)}</span>`
       : t.livePrice != null
-        ? `<span class="mono" title="live price">${fmtP(t.livePrice)} <span style="font-size:9px;color:var(--muted)">live</span></span>`
+        ? `<span class="mono" title="live">${fmtP(t.livePrice)} <span style="font-size:9px;color:var(--muted)">live</span></span>`
         : `<span style="color:var(--muted)">--</span>`;
-    const pnlCell  = t.pnlPct != null
+
+    const pnlUsdtCell = t.pnlUsdt != null
+      ? t.pnlUsdt >= 0
+        ? `<span class="pnl-pos">+$${Math.abs(t.pnlUsdt).toFixed(2)}</span>`
+        : `<span class="pnl-neg">-$${Math.abs(t.pnlUsdt).toFixed(2)}</span>`
+      : `<span class="pnl-neu">--</span>`;
+
+    const pnlPctCell = t.pnlPct != null
       ? t.outcome === 'OPEN'
         ? t.pnlPct >= 0
           ? `<span class="pnl-pos">+${t.pnlPct.toFixed(2)}% <span style="font-size:9px;font-weight:400">unrlzd</span></span>`
@@ -628,11 +901,13 @@ function renderTrades(trades) {
     return `<tr>
       <td style="color:var(--muted);font-size:12px;font-family:var(--mono)">${openTs}${closeTs}</td>
       <td class="mono"><strong>${t.symbol.replace('USDT','')}</strong><span style="color:var(--muted)">/USDT</span></td>
+      <td>${stag}</td>
       <td>${side}</td>
       <td class="mono">${fmtP(t.entryPrice)}</td>
       <td>${exitCell}</td>
       <td>${out}</td>
-      <td>${pnlCell}</td>
+      <td>${pnlUsdtCell}</td>
+      <td>${pnlPctCell}</td>
     </tr>`;
   }).join('');
 }
@@ -648,19 +923,6 @@ function setAutoRefresh() {
   if (refreshTmr) clearInterval(refreshTmr);
   const rate = parseInt(document.getElementById('refreshRate').value);
   if (rate > 0) refreshTmr = setInterval(loadAll, rate * 1000);
-}
-
-function fmtP(n) {
-  if (n == null || n === 0) return '--';
-  if (n >= 1000) return n.toLocaleString('en', {maximumFractionDigits:2});
-  if (n >= 1)    return n.toFixed(4);
-  return n.toFixed(6);
-}
-
-function fmt(n, d=4) {
-  if (!n || n === 0) return '0';
-  if (n >= 1000) return n.toLocaleString('en', {maximumFractionDigits:2});
-  return parseFloat(n).toFixed(d).replace(/\.?0+$/, '');
 }
 
 function showError(msg) { const b = document.getElementById('errorBar'); b.innerHTML = msg; b.style.display = 'block'; }

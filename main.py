@@ -1,6 +1,6 @@
 """
-MAIN — Full Bot Entry Point
-============================
+MAIN — Full Bot Entry Point  (Futures Edition)
+================================================
 """
 import sys, io, logging, os, time, hmac, hashlib, requests
 from datetime import datetime, timezone
@@ -12,50 +12,95 @@ load_dotenv()
 # ── Flask proxy app ──────────────────────────────────────────────────────────
 app = Flask(__name__)
 
-BINANCE_BASE = 'https://testnet.binance.vision/api'
+TESTNET = os.environ.get('TESTNET', 'true').lower() == 'true'
+if TESTNET:
+    BINANCE_BASE = 'https://testnet.binancefuture.com/fapi'
+else:
+    BINANCE_BASE = 'https://fapi.binance.com/fapi'
+
 API_KEY    = os.environ.get('BINANCE_API_KEY', '')
 API_SECRET = os.environ.get('BINANCE_API_SECRET', '')
 
-def binance_signed(path, params={}):
-    p = dict(params)
-    p['timestamp'] = int(time.time() * 1000)
-    qs  = '&'.join(f'{k}={v}' for k, v in p.items())
+
+def _sign(params: dict) -> dict:
+    params['timestamp'] = int(time.time() * 1000)
+    qs  = '&'.join(f'{k}={v}' for k, v in params.items())
     sig = hmac.new(API_SECRET.encode(), qs.encode(), hashlib.sha256).hexdigest()
-    url = f'{BINANCE_BASE}{path}?{qs}&signature={sig}'
-    return requests.get(url, headers={'X-MBX-APIKEY': API_KEY}).json()
+    params['signature'] = sig
+    return params
 
 
-@app.route('/proxy/v3/account')
-def proxy_v3_account():
-    return jsonify(binance_signed('/v3/account'))
+def binance_signed(path, params={}):
+    p = _sign(dict(params))
+    qs  = '&'.join(f'{k}={v}' for k, v in p.items())
+    url = f'{BINANCE_BASE}{path}?{qs}'
+    return requests.get(url, headers={'X-MBX-APIKEY': API_KEY}, timeout=10).json()
 
 
-@app.route('/proxy/v3/openOrders')
-def proxy_v3_open_orders():
-    return jsonify(binance_signed('/v3/openOrders'))
+# ── Futures proxy routes ─────────────────────────────────────────────────────
+
+@app.route('/proxy/fapi/v2/account')
+def proxy_fapi_account():
+    return jsonify(binance_signed('/v2/account'))
 
 
-@app.route('/proxy/v3/allOrders')
-def proxy_v3_all_orders():
+@app.route('/proxy/fapi/v1/openOrders')
+def proxy_fapi_open_orders():
     sym = request.args.get('symbol', '')
-    return jsonify(binance_signed('/v3/allOrders', {'symbol': sym, 'limit': 100}))
+    params = {'symbol': sym} if sym else {}
+    return jsonify(binance_signed('/v1/openOrders', params))
 
-@app.route('/proxy/v3/ticker/price')
-def proxy_v3_ticker_price():
+
+@app.route('/proxy/fapi/v1/allOrders')
+def proxy_fapi_all_orders():
     sym = request.args.get('symbol', '')
-    url = f'{BINANCE_BASE}/v3/ticker/price?symbol={sym}'
-    return jsonify(requests.get(url).json())
+    return jsonify(binance_signed('/v1/allOrders', {'symbol': sym, 'limit': 500}))
+
+
+@app.route('/proxy/fapi/v1/ticker/price')
+def proxy_fapi_ticker_price():
+    sym = request.args.get('symbol', '')
+    url = f'{BINANCE_BASE}/v1/ticker/price?symbol={sym}'
+    return jsonify(requests.get(url, timeout=10).json())
+
+
+@app.route('/proxy/fapi/v2/positionRisk')
+def proxy_fapi_position_risk():
+    sym = request.args.get('symbol', '')
+    params = {'symbol': sym} if sym else {}
+    return jsonify(binance_signed('/v2/positionRisk', params))
+
+
+# ── Bot-internal data routes ─────────────────────────────────────────────────
+
+@app.route('/proxy/trades')
+def proxy_trades():
+    if manager and manager.closed_positions:
+        return jsonify(manager.closed_positions)
+    return jsonify([])
+
+
+@app.route('/proxy/open_positions')
+def proxy_open_positions():
+    """Return live open positions with duration info from the in-memory tracker."""
+    if manager:
+        return jsonify(manager.get_open_positions_list())
+    return jsonify([])
+
+
+@app.route('/proxy/stats')
+def proxy_stats():
+    """Return strategy-level stats: consecutive losses, open count."""
+    if manager:
+        return jsonify(manager.get_stats())
+    return jsonify({'consec_losses': {'S1': 0, 'S2': 0}, 'open_count': 0})
+
 
 @app.after_request
 def cors(r):
     r.headers['Access-Control-Allow-Origin'] = '*'
     return r
-    
-@app.route('/proxy/trades')
-def proxy_trades():
-    if manager and manager.closed_positions:
-        return jsonify([p.__dict__ for p in manager.closed_positions])
-    return jsonify([])
+
 
 # ── Windows UTF-8 fix ────────────────────────────────────────────────────────
 if sys.platform == 'win32':
@@ -77,7 +122,6 @@ logging.basicConfig(
     ]
 )
 log = logging.getLogger('main')
-# Suppress werkzeug HTTP access logs — add this right here
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
 from step1_candle_engine   import CandleEngine, SYMBOLS, TESTNET
@@ -104,11 +148,12 @@ def main():
 
     print(f"""
 +------------------------------------------------------+
-|  DUAL STRATEGY BOT  --  Full Run                     |
-|  Strategy 1 : EMA 9/26 Cross + 6 Filters             |
-|  Strategy 2 : MA44 Bounce (SHORT only)               |
+|  DUAL STRATEGY BOT  --  Futures Edition              |
+|  Strategy 1 : EMA 9/26 Cross  $400 × 50x            |
+|  Strategy 2 : MA44 Bounce     $333 × 15x            |
 |  Symbols    : {len(SYMBOLS)} coins                              |
 |  Timeframe  : 15m candles                            |
+|  Max Trades : 10 open at once                        |
 |  Mode       : {'TESTNET (paper money)' if TESTNET else 'LIVE'}                    |
 |  Started    : {datetime.now(tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}              |
 +------------------------------------------------------+
@@ -154,7 +199,6 @@ def main():
 
 if __name__ == '__main__':
     import threading
-    # Run bot in background thread, Flask in main thread
     t = threading.Thread(target=main, daemon=True)
     t.start()
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
