@@ -49,12 +49,12 @@ TESTNET    = os.getenv('TESTNET', 'true').lower() == 'true'
 if TESTNET:
     BASE_URL = "https://demo-fapi.binance.com/fapi"
 
-# Strategy-specific trade sizing
+# Strategy-specific trade sizing  (sized for 5,000 USDT wallet)
 STRATEGY_CONFIG = {
-    'S1': {'margin_usdt': 400.0, 'leverage': 50},   # EMA Cross
-    'S2': {'margin_usdt': 333.0, 'leverage': 15},   # MA44 Bounce
+    'S1': {'margin_usdt': 200.0,  'leverage': 50},   # EMA Cross   → $10,000 notional
+    'S2': {'margin_usdt': 166.5,  'leverage': 15},   # MA44 Bounce → $2,497.5 notional
 }
-DEFAULT_MARGIN   = 400.0
+DEFAULT_MARGIN   = 200.0
 DEFAULT_LEVERAGE = 50
 
 MAX_OPEN_POSITIONS = 10
@@ -346,7 +346,8 @@ class OpenPosition:
                  entry_price, sl_price, tp_price,
                  quantity, margin_usdt, leverage,
                  tp_order_id, sl_order_id,
-                 entry_order_id, signal_ts, signal_time):
+                 entry_order_id, signal_ts, signal_time,
+                 signal_price=None):
         self.symbol         = symbol
         self.strategy       = strategy
         self.direction      = direction
@@ -361,6 +362,7 @@ class OpenPosition:
         self.entry_order_id = entry_order_id
         self.signal_ts      = signal_ts
         self.signal_time    = signal_time
+        self.signal_price   = signal_price   # intended entry from signal (for slippage calc)
         self.open_time      = datetime.now(tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
         self.open_ts        = int(time.time() * 1000)
 
@@ -546,6 +548,7 @@ class OrderManager:
                 entry_order_id = entry_order_id,
                 signal_ts      = signal.signal_ts,
                 signal_time    = signal.signal_time,
+                signal_price   = signal.entry_price,   # intended price for slippage tracking
             )
 
             with self._lock:
@@ -622,9 +625,9 @@ class OrderManager:
                 writer = csv.writer(f)
                 writer.writerow([
                     'open_time', 'close_time', 'symbol', 'strategy',
-                    'direction', 'entry_price', 'sl_price', 'tp_price',
+                    'direction', 'signal_price', 'entry_price', 'sl_price', 'tp_price',
                     'quantity', 'margin_usdt', 'leverage', 'outcome',
-                    'pnl_pct', 'pnl_usdt', 'signal_time',
+                    'pnl_pct', 'pnl_usdt', 'fee_usdt', 'slippage_pct', 'signal_time',
                 ])
 
     def _load_supabase_history(self):
@@ -655,22 +658,36 @@ class OrderManager:
         notional = pos.margin_usdt * pos.leverage
         pnl_usdt = notional * (pnl_pct / 100)
 
+        # Exact fee calculation based on order types
+        # Entry: MARKET (taker 0.05%), Exit: TAKE_PROFIT maker (0.02%) or STOP taker (0.05%)
+        entry_fee_rate = 0.0005
+        exit_fee_rate  = 0.0002 if outcome == 'WIN' else 0.0005
+        fee_usdt       = round(notional * (entry_fee_rate + exit_fee_rate), 4)
+
+        # Slippage: actual fill vs signal's intended price
+        signal_price  = pos.signal_price if pos.signal_price else pos.entry_price
+        slippage_pct  = round((pos.entry_price - signal_price) / signal_price * 100, 4) \
+                        if signal_price else 0.0
+
         row = {
-            'open_time':   pos.open_time,
-            'close_time':  close_time,
-            'symbol':      pos.symbol,
-            'strategy':    pos.strategy,
-            'direction':   pos.direction,
-            'entry_price': round(pos.entry_price, 8),
-            'sl_price':    round(pos.sl_price, 8),
-            'tp_price':    round(pos.tp_price, 8),
-            'quantity':    pos.quantity,
-            'margin_usdt': pos.margin_usdt,
-            'leverage':    pos.leverage,
-            'outcome':     outcome,
-            'pnl_pct':     round(pnl_pct, 3),
-            'pnl_usdt':    round(pnl_usdt, 2),
-            'signal_time': pos.signal_time,
+            'open_time':    pos.open_time,
+            'close_time':   close_time,
+            'symbol':       pos.symbol,
+            'strategy':     pos.strategy,
+            'direction':    pos.direction,
+            'signal_price': round(signal_price, 8),
+            'entry_price':  round(pos.entry_price, 8),
+            'sl_price':     round(pos.sl_price, 8),
+            'tp_price':     round(pos.tp_price, 8),
+            'quantity':     pos.quantity,
+            'margin_usdt':  pos.margin_usdt,
+            'leverage':     pos.leverage,
+            'outcome':      outcome,
+            'pnl_pct':      round(pnl_pct, 3),
+            'pnl_usdt':     round(pnl_usdt, 2),
+            'fee_usdt':     fee_usdt,
+            'slippage_pct': slippage_pct,
+            'signal_time':  pos.signal_time,
         }
 
         self.supabase.insert('trades', row)
@@ -680,13 +697,16 @@ class OrderManager:
             writer = csv.writer(f)
             writer.writerow([
                 row['open_time'], row['close_time'], row['symbol'], row['strategy'],
-                row['direction'], row['entry_price'], row['sl_price'], row['tp_price'],
+                row['direction'], row['signal_price'], row['entry_price'],
+                row['sl_price'], row['tp_price'],
                 row['quantity'], row['margin_usdt'], row['leverage'], row['outcome'],
-                row['pnl_pct'], row['pnl_usdt'], row['signal_time'],
+                row['pnl_pct'], row['pnl_usdt'], row['fee_usdt'],
+                row['slippage_pct'], row['signal_time'],
             ])
 
         log.info(f"[LOG] Trade closed: {pos.symbol} {outcome} "
-                 f"PnL={pnl_pct:+.3f}% / ${pnl_usdt:+.2f}")
+                 f"PnL={pnl_pct:+.3f}% / ${pnl_usdt:+.2f} | "
+                 f"Fee=${fee_usdt:.4f} | Slippage={slippage_pct:+.4f}%")
 
 
 # ============================================================================

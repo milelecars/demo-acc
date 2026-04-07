@@ -370,6 +370,8 @@
                 <th onclick="sortBy('exitPrice')">Exit</th>
                 <th onclick="sortBy('outcome')">Result</th>
                 <th onclick="sortBy('pnlUsdt')">P&amp;L $</th>
+                <th onclick="sortBy('feeUsdt')">Fee $</th>
+                <th onclick="sortBy('slippagePct')">Slip %</th>
                 <th onclick="sortBy('pnlPct')">P&amp;L %</th>
               </tr>
             </thead>
@@ -635,18 +637,21 @@ async function loadTrades() {
     const data = await apiFetch(PROXY + '/trades');
     if (Array.isArray(data) && data.length > 0) {
       trades = data.map(t => ({
-        symbol:     t.symbol,
-        strategy:   t.strategy?.startsWith('S1') ? 'S1' : t.strategy?.startsWith('S2') ? 'S2' : '',
-        direction:  t.direction,
-        openTime:   parseTimestamp(t.open_time),
-        closeTime:  t.close_time ? parseTimestamp(t.close_time) : null,
-        entryPrice: t.entry_price,
-        exitPrice:  t.outcome === 'WIN' ? t.tp_price : t.outcome === 'LOSS' ? t.sl_price : null,
-        outcome:    t.outcome,
-        pnlPct:     t.pnl_pct ?? null,
-        pnlUsdt:    t.pnl_usdt ?? null,
-        marginUsdt: t.margin_usdt ?? null,
-        leverage:   t.leverage ?? null,
+        symbol:       t.symbol,
+        strategy:     t.strategy?.startsWith('S1') ? 'S1' : t.strategy?.startsWith('S2') ? 'S2' : '',
+        direction:    t.direction,
+        openTime:     parseTimestamp(t.open_time),
+        closeTime:    t.close_time ? parseTimestamp(t.close_time) : null,
+        signalPrice:  t.signal_price ?? null,
+        entryPrice:   t.entry_price,
+        exitPrice:    t.outcome === 'WIN' ? t.tp_price : t.outcome === 'LOSS' ? t.sl_price : null,
+        outcome:      t.outcome,
+        pnlPct:       t.pnl_pct ?? null,
+        pnlUsdt:      t.pnl_usdt ?? null,
+        feeUsdt:      t.fee_usdt ?? null,
+        slippagePct:  t.slippage_pct ?? null,
+        marginUsdt:   t.margin_usdt ?? null,
+        leverage:     t.leverage ?? null,
       }));
     }
   } catch(e) {
@@ -774,20 +779,21 @@ function updateStats() {
   }
 
   // Total P&L in USDT
-  const totalPnlUsdt = closed.reduce((s,t) => s + (t.pnlUsdt || 0), 0);
-  const totalPnlPct  = closed.reduce((s,t) => s + (t.pnlPct  || 0), 0);
+  const totalPnlUsdt  = closed.reduce((s,t) => s + (t.pnlUsdt || 0), 0);
+  const totalPnlPct   = closed.reduce((s,t) => s + (t.pnlPct  || 0), 0);
+  const totalFeeUsdt  = closed.reduce((s,t) => s + (t.feeUsdt  || 0), 0);
+  const netPnlUsdt    = totalPnlUsdt - totalFeeUsdt;
   const pel = document.getElementById('statPnlUsdt');
-  pel.textContent = fmtUsdt(totalPnlUsdt);
-  pel.className   = 'stat-value ' + (totalPnlUsdt >= 0 ? 'c-green' : 'c-red');
+  pel.textContent = fmtUsdt(netPnlUsdt);
+  pel.className   = 'stat-value ' + (netPnlUsdt >= 0 ? 'c-green' : 'c-red');
   document.getElementById('statPnlPct').textContent =
-    (totalPnlPct >= 0 ? '+' : '') + totalPnlPct.toFixed(2) + '% cumulative';
+    (totalPnlPct >= 0 ? '+' : '') + totalPnlPct.toFixed(2) + '% gross · fees ' + fmtUsdt(-totalFeeUsdt);
 
-  // Apply P&L on top of raw API balance for header card + wallet panel
+  // Apply net P&L (after fees) on top of raw API balance
   if (rawUsdtBalance > 0) {
-    const adjustedBal = rawUsdtBalance + totalPnlUsdt;
+    const adjustedBal = rawUsdtBalance + netPnlUsdt;
     document.getElementById('statUsdt').textContent =
       '$' + adjustedBal.toLocaleString('en', {minimumFractionDigits:2, maximumFractionDigits:2});
-    // Also update wallet panel USDT row
     const walletAmtEl = document.getElementById('walletAmt-USDT');
     if (walletAmtEl) {
       walletAmtEl.textContent =
@@ -818,10 +824,12 @@ function updateStats() {
 }
 
 function updateStrategyStats(strat, tradesEl, wrEl, pnlEl) {
-  const stratTrades  = allTrades.filter(t => t.strategy === strat);
-  const stratClosed  = stratTrades.filter(t => t.outcome !== 'OPEN');
-  const stratWins    = stratTrades.filter(t => t.outcome === 'WIN');
-  const stratPnlUsdt = stratClosed.reduce((s,t) => s + (t.pnlUsdt || 0), 0);
+  const stratTrades   = allTrades.filter(t => t.strategy === strat);
+  const stratClosed   = stratTrades.filter(t => t.outcome !== 'OPEN');
+  const stratWins     = stratTrades.filter(t => t.outcome === 'WIN');
+  const stratPnlUsdt  = stratClosed.reduce((s,t) => s + (t.pnlUsdt || 0), 0);
+  const stratFeeUsdt  = stratClosed.reduce((s,t) => s + (t.feeUsdt  || 0), 0);
+  const stratNetUsdt  = stratPnlUsdt - stratFeeUsdt;
 
   tradesEl.textContent = stratClosed.length;
 
@@ -834,8 +842,8 @@ function updateStrategyStats(strat, tradesEl, wrEl, pnlEl) {
     wrEl.className   = 'strat-value';
   }
 
-  pnlEl.textContent = stratClosed.length ? fmtUsdt(stratPnlUsdt) : '--';
-  pnlEl.className   = 'strat-value ' + (stratPnlUsdt >= 0 ? 'c-green' : 'c-red');
+  pnlEl.textContent = stratClosed.length ? fmtUsdt(stratNetUsdt) : '--';
+  pnlEl.className   = 'strat-value ' + (stratNetUsdt >= 0 ? 'c-green' : 'c-red');
 }
 
 // ── Filters ───────────────────────────────────────────────────────────────────
@@ -878,7 +886,7 @@ function applyFilters() {
 function renderTrades(trades) {
   const tbody = document.getElementById('tradeBody');
   if (!trades.length) {
-    tbody.innerHTML = '<tr><td colspan="9"><div class="empty">No trades match your filters</div></td></tr>';
+    tbody.innerHTML = '<tr><td colspan="11"><div class="empty">No trades match your filters</div></td></tr>';
     return;
   }
 
@@ -910,6 +918,18 @@ function renderTrades(trades) {
         : `<span class="pnl-neg">-$${Math.abs(t.pnlUsdt).toFixed(2)}</span>`
       : `<span class="pnl-neu">--</span>`;
 
+    const feeCell = t.feeUsdt != null && t.outcome !== 'OPEN'
+      ? `<span class="pnl-neg" style="font-size:12px">-$${t.feeUsdt.toFixed(2)}</span>`
+      : `<span style="color:var(--muted)">--</span>`;
+
+    const slipCell = t.slippagePct != null && t.outcome !== 'OPEN'
+      ? t.slippagePct === 0
+        ? `<span style="color:var(--muted);font-family:var(--mono);font-size:12px">0.00%</span>`
+        : t.slippagePct > 0
+          ? `<span class="pnl-neg" style="font-size:12px">${t.slippagePct > 0 ? '+' : ''}${t.slippagePct.toFixed(4)}%</span>`
+          : `<span class="pnl-pos" style="font-size:12px">${t.slippagePct.toFixed(4)}%</span>`
+      : `<span style="color:var(--muted)">--</span>`;
+
     const pnlPctCell = t.pnlPct != null
       ? t.outcome === 'OPEN'
         ? t.pnlPct >= 0
@@ -929,6 +949,8 @@ function renderTrades(trades) {
       <td>${exitCell}</td>
       <td>${out}</td>
       <td>${pnlUsdtCell}</td>
+      <td>${feeCell}</td>
+      <td>${slipCell}</td>
       <td>${pnlPctCell}</td>
     </tr>`;
   }).join('');
