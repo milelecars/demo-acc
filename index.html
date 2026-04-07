@@ -210,8 +210,6 @@
 <div class="header">
   <div class="header-left">
     <div class="logo">Bot<span>Dash</span></div>
-    <span class="pill pill-futures">FUTURES</span>
-    <span class="pill pill-testnet" id="modeLabel">TESTNET</span>
     <div class="live-dot"></div>
   </div>
   <div class="header-right">
@@ -658,8 +656,10 @@ async function loadTrades() {
 function parseTimestamp(s) {
   if (!s) return 0;
   if (typeof s === 'number') return s;
-  // "2024-01-15 14:30 UTC" or ISO
-  return new Date(s.replace(' UTC', 'Z').replace(' ', 'T')).getTime() || 0;
+  // Force UTC parsing by ensuring Z suffix
+  return new Date(
+    s.replace(' UTC', 'Z').replace(' ', 'T')
+  ).getTime() || 0;
 }
 
 // ── Futures order pairing fallback ────────────────────────────────────────────
@@ -776,8 +776,10 @@ function updateStats() {
 
   // Today's P&L in USDT
   const todayStr = new Date().toLocaleDateString('en-GB', {timeZone:'Asia/Dubai'});
+  // Change openTime → closeTime for today filter
   const todayTrades = closed.filter(t =>
-    new Date(t.openTime).toLocaleDateString('en-GB', {timeZone:'Asia/Dubai'}) === todayStr
+      t.closeTime &&
+      new Date(t.closeTime).toLocaleDateString('en-GB', {timeZone:'Asia/Dubai'}) === todayStr
   );
   const todayPnl = todayTrades.reduce((s,t) => s + (t.pnlUsdt || 0), 0);
   const todayEl = document.getElementById('statToday');
