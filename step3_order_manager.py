@@ -11,12 +11,15 @@ Changes in this version:
   - Consecutive-loss counters per strategy exposed for dashboard
   - pnl_usdt stored alongside pnl_pct in trade log
   - Fixed scientific notation bug (_fmt_price) retained from previous version
+  - Fix: maxQty cap to prevent Exceeded maximum allowable position (Error -2027)
+  - Fix: TP/SL use TAKE_PROFIT/STOP with workingType=CONTRACT_PRICE (Error -4120)
 """
 
 import os
 import sys
 import io
 import csv
+import math
 import time
 import hmac
 import hashlib
@@ -51,7 +54,7 @@ STRATEGY_CONFIG = {
     'S1': {'margin_usdt': 400.0, 'leverage': 50},   # EMA Cross
     'S2': {'margin_usdt': 333.0, 'leverage': 15},   # MA44 Bounce
 }
-DEFAULT_MARGIN  = 400.0
+DEFAULT_MARGIN   = 400.0
 DEFAULT_LEVERAGE = 50
 
 MAX_OPEN_POSITIONS = 10
@@ -63,7 +66,7 @@ SUPABASE_KEY = os.getenv('SUPABASE_KEY', '')
 
 
 # ============================================================================
-# SUPABASE CLIENT  (unchanged)
+# SUPABASE CLIENT
 # ============================================================================
 
 class SupabaseClient:
@@ -169,21 +172,18 @@ class BinanceClient:
     # ── Futures-specific helpers ──────────────────────────────────────────────
 
     def set_leverage(self, symbol: str, leverage: int) -> dict:
-        """Set leverage for a symbol (Futures only)."""
         return self._post('/v1/leverage', {
             'symbol':   symbol,
             'leverage': leverage,
         })
 
     def set_margin_type(self, symbol: str, margin_type: str = 'ISOLATED') -> dict:
-        """Set margin type to ISOLATED or CROSSED (Futures only)."""
         try:
             return self._post('/v1/marginType', {
                 'symbol':     symbol,
                 'marginType': margin_type,
             })
         except Exception as e:
-            # Binance returns error -4046 if already set to requested type — ignore it
             if '-4046' in str(e):
                 log.debug(f"{symbol}: margin type already {margin_type}")
                 return {}
@@ -224,27 +224,33 @@ class BinanceClient:
 
     def place_take_profit_order(self, symbol: str, side: str,
                                 quantity: float, tp_price: float) -> dict:
-        """TAKE_PROFIT_MARKET order for futures."""
+        """TAKE_PROFIT order — compatible with demo-fapi (fixes Error -4120)."""
         params = {
-            'symbol':    symbol,
-            'side':      side,
-            'type':      'TAKE_PROFIT_MARKET',
-            'quantity':  self._fmt_price(quantity),
-            'stopPrice': self._fmt_price(tp_price),
-            'reduceOnly': 'true',
+            'symbol':      symbol,
+            'side':        side,
+            'type':        'TAKE_PROFIT',
+            'quantity':    self._fmt_price(quantity),
+            'price':       self._fmt_price(tp_price),
+            'stopPrice':   self._fmt_price(tp_price),
+            'timeInForce': 'GTC',
+            'reduceOnly':  'true',
+            'workingType': 'CONTRACT_PRICE',
         }
         return self._post('/v1/order', params)
 
     def place_stop_loss_order(self, symbol: str, side: str,
                               quantity: float, sl_price: float) -> dict:
-        """STOP_MARKET order for futures."""
+        """STOP order — compatible with demo-fapi (fixes Error -4120)."""
         params = {
-            'symbol':    symbol,
-            'side':      side,
-            'type':      'STOP_MARKET',
-            'quantity':  self._fmt_price(quantity),
-            'stopPrice': self._fmt_price(sl_price),
-            'reduceOnly': 'true',
+            'symbol':      symbol,
+            'side':        side,
+            'type':        'STOP',
+            'quantity':    self._fmt_price(quantity),
+            'price':       self._fmt_price(sl_price),
+            'stopPrice':   self._fmt_price(sl_price),
+            'timeInForce': 'GTC',
+            'reduceOnly':  'true',
+            'workingType': 'CONTRACT_PRICE',
         }
         return self._post('/v1/order', params)
 
@@ -261,7 +267,6 @@ class BinanceClient:
         return self._get('/v1/openOrders', params, signed=True)
 
     def get_position(self, symbol: str) -> dict:
-        """Get current futures position for a symbol."""
         data = self._get('/v2/positionRisk', {'symbol': symbol}, signed=True)
         if isinstance(data, list) and data:
             return data[0]
@@ -301,6 +306,7 @@ class PrecisionCache:
             'price_step':     float(tick.get('tickSize', '0.01')),
             'price_decimals': _decimals(tick.get('tickSize', '0.01')),
             'min_qty':        float(lot.get('minQty', '0.001')),
+            'max_qty':        float(lot.get('maxQty', '9999999')),   # ← for Error -2027
             'min_notional':   float(notional.get('minNotional', '5')),
         }
 
@@ -308,10 +314,21 @@ class PrecisionCache:
             self._cache[symbol] = result
         return result
 
-    def round_qty(self, symbol: str, qty: float) -> float:
-        p    = self.get(symbol)
-        step = p['qty_step']
-        return round(round(qty / step) * step, p['qty_decimals'])
+    def calc_quantity(self, symbol: str, price: float,
+                      margin: float, leverage: int) -> float:
+        """
+        Compute order quantity capped to symbol's maxQty.
+        Fixes Error -2027 (Exceeded maximum allowable position).
+        """
+        notional = margin * leverage
+        raw_qty  = notional / price
+        prec     = self.get(symbol)
+        step     = prec['qty_step']
+        max_qty  = prec['max_qty']
+        raw_qty  = min(raw_qty, max_qty)
+        # floor to stepSize using math.floor to avoid floating-point overshoot
+        qty = math.floor(raw_qty / step) * step
+        return round(qty, prec['qty_decimals'])
 
     def round_price(self, symbol: str, price: float) -> float:
         p    = self.get(symbol)
@@ -345,7 +362,7 @@ class OpenPosition:
         self.signal_ts      = signal_ts
         self.signal_time    = signal_time
         self.open_time      = datetime.now(tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
-        self.open_ts        = int(time.time() * 1000)  # ms timestamp for duration calc
+        self.open_ts        = int(time.time() * 1000)
 
 
 # ============================================================================
@@ -368,14 +385,14 @@ class OrderManager:
         self.precision = PrecisionCache(self.client)
         self.supabase  = SupabaseClient(SUPABASE_URL, SUPABASE_KEY)
 
-        self._lock               = threading.Lock()
-        self._open_positions     = {}      # symbol → OpenPosition
-        self._pending_symbols    = set()
+        self._lock            = threading.Lock()
+        self._open_positions  = {}      # symbol → OpenPosition
+        self._pending_symbols = set()
 
-        # Consecutive loss counters per strategy (for dashboard + S2 pause logic)
-        self._consec_losses      = {'S1': 0, 'S2': 0}
+        # Consecutive loss counters per strategy
+        self._consec_losses   = {'S1': 0, 'S2': 0}
 
-        # In-memory history — loaded from Supabase on startup
+        # In-memory history loaded from Supabase on startup
         self.closed_positions = []
         self._load_supabase_history()
 
@@ -398,7 +415,6 @@ class OrderManager:
     # ── Public stats for dashboard ────────────────────────────────────────────
 
     def get_open_positions_list(self) -> list:
-        """Return a JSON-serialisable list of open positions with duration info."""
         now_ms = int(time.time() * 1000)
         result = []
         with self._lock:
@@ -408,23 +424,22 @@ class OrderManager:
                 mins       = rem // 60
                 duration   = f"{hours}h {mins:02d}m" if hours else f"{mins}m"
                 result.append({
-                    'symbol':       pos.symbol,
-                    'strategy':     pos.strategy,
-                    'direction':    pos.direction,
-                    'entry_price':  pos.entry_price,
-                    'sl_price':     pos.sl_price,
-                    'tp_price':     pos.tp_price,
-                    'quantity':     pos.quantity,
-                    'margin_usdt':  pos.margin_usdt,
-                    'leverage':     pos.leverage,
-                    'open_time':    pos.open_time,
-                    'open_ts':      pos.open_ts,
-                    'duration':     duration,
+                    'symbol':      pos.symbol,
+                    'strategy':    pos.strategy,
+                    'direction':   pos.direction,
+                    'entry_price': pos.entry_price,
+                    'sl_price':    pos.sl_price,
+                    'tp_price':    pos.tp_price,
+                    'quantity':    pos.quantity,
+                    'margin_usdt': pos.margin_usdt,
+                    'leverage':    pos.leverage,
+                    'open_time':   pos.open_time,
+                    'open_ts':     pos.open_ts,
+                    'duration':    duration,
                 })
         return result
 
     def get_stats(self) -> dict:
-        """Return strategy-level stats for dashboard."""
         return {
             'consec_losses': dict(self._consec_losses),
             'open_count':    len(self._open_positions),
@@ -447,24 +462,19 @@ class OrderManager:
         strategy  = signal.strategy
 
         with self._lock:
-            # Global position cap
             total_open = len(self._open_positions) + len(self._pending_symbols)
             if total_open >= MAX_OPEN_POSITIONS:
                 log.info(f"[SKIP] {symbol}: max open positions ({MAX_OPEN_POSITIONS}) reached")
                 return
-
             if symbol in self._open_positions:
                 log.info(f"[SKIP] {symbol}: already has open position")
                 return
             if symbol in self._pending_symbols:
                 log.info(f"[SKIP] {symbol}: entry already in progress")
                 return
-
-            # S2 pause after 2 consecutive losses
             if strategy == 'S2' and self._consec_losses.get('S2', 0) >= 2:
                 log.info(f"[SKIP] S2 paused after {self._consec_losses['S2']} consecutive losses")
                 return
-
             self._pending_symbols.add(symbol)
 
         log.info(f"[ORDER] Processing signal: {symbol} {strategy} {direction} "
@@ -476,17 +486,14 @@ class OrderManager:
         leverage = cfg['leverage']
 
         try:
-            # Set isolated margin + leverage before placing any order
             self.client.set_margin_type(symbol, 'ISOLATED')
             self.client.set_leverage(symbol, leverage)
 
             current_price = self.client.get_ticker_price(symbol)
             prec          = self.precision.get(symbol)
 
-            # Notional = margin × leverage; qty = notional / price
-            notional  = margin * leverage
-            raw_qty   = notional / current_price
-            qty       = self.precision.round_qty(symbol, raw_qty)
+            # Use calc_quantity — caps to maxQty (fixes Error -2027)
+            qty = self.precision.calc_quantity(symbol, current_price, margin, leverage)
 
             if qty < prec['min_qty']:
                 log.warning(f"[SKIP] {symbol}: qty {qty} < min_qty {prec['min_qty']}")
@@ -501,8 +508,7 @@ class OrderManager:
             entry_result   = self.client.place_market_order(symbol, entry_side, qty)
             entry_order_id = entry_result['orderId']
 
-            # Derive actual fill price
-            avg_price = float(entry_result.get('avgPrice', 0) or 0)
+            avg_price    = float(entry_result.get('avgPrice', 0) or 0)
             actual_entry = avg_price if avg_price > 0 else current_price
 
             log.info(f"[ORDER] Entry filled: {entry_side} {qty} {symbol} @ {actual_entry:.6f} "
@@ -516,9 +522,9 @@ class OrderManager:
 
             exit_side = 'SELL' if direction == 'LONG' else 'BUY'
 
-            tp_result = self.client.place_take_profit_order(symbol, exit_side, qty, tp_price)
-            sl_result = self.client.place_stop_loss_order(symbol, exit_side, qty, sl_price)
-
+            # Uses TAKE_PROFIT / STOP with workingType (fixes Error -4120)
+            tp_result   = self.client.place_take_profit_order(symbol, exit_side, qty, tp_price)
+            sl_result   = self.client.place_stop_loss_order(symbol, exit_side, qty, sl_price)
             tp_order_id = tp_result['orderId']
             sl_order_id = sl_result['orderId']
 
@@ -570,10 +576,8 @@ class OrderManager:
 
         for pos in positions:
             try:
-                # Check if TP or SL order has filled
-                tp_order = self.client.get_order(pos.symbol, pos.tp_order_id)
-                sl_order = self.client.get_order(pos.symbol, pos.sl_order_id)
-
+                tp_order  = self.client.get_order(pos.symbol, pos.tp_order_id)
+                sl_order  = self.client.get_order(pos.symbol, pos.sl_order_id)
                 tp_filled = tp_order.get('status') in ('FILLED', 'PARTIALLY_FILLED')
                 sl_filled = sl_order.get('status') in ('FILLED', 'PARTIALLY_FILLED')
 
@@ -582,7 +586,6 @@ class OrderManager:
 
                 outcome = 'WIN' if tp_filled else 'LOSS'
 
-                # Cancel the other leg
                 try:
                     if tp_filled:
                         self.client.cancel_order(pos.symbol, pos.sl_order_id)
@@ -599,7 +602,6 @@ class OrderManager:
 
                 with self._lock:
                     self._open_positions.pop(pos.symbol, None)
-                    # Update consecutive loss counter
                     strat = pos.strategy
                     if outcome == 'WIN':
                         self._consec_losses[strat] = 0
@@ -612,7 +614,7 @@ class OrderManager:
             except Exception as e:
                 log.warning(f"Could not check position {pos.symbol}: {e}")
 
-    # ── CSV trade log ─────────────────────────────────────────────────────────
+    # ── Logging ───────────────────────────────────────────────────────────────
 
     def _init_csv(self):
         if not os.path.exists(TRADE_LOG_FILE):
@@ -650,7 +652,6 @@ class OrderManager:
         else:
             pnl_pct = 0.0
 
-        # USDT P&L based on margin × leverage × pnl%
         notional = pos.margin_usdt * pos.leverage
         pnl_usdt = notional * (pnl_pct / 100)
 
@@ -732,6 +733,14 @@ if __name__ == '__main__':
         print(f"  [OK] BTCUSDT price        : ${price:.2f}")
     except Exception as e:
         print(f"  [FAIL] Price fetch        : {e}")
+
+    try:
+        pc   = PrecisionCache(client)
+        qty  = pc.calc_quantity('BTCUSDT', price, DEFAULT_MARGIN, DEFAULT_LEVERAGE)
+        prec = pc.get('BTCUSDT')
+        print(f"  [OK] BTCUSDT qty          : {qty} (maxQty={prec['max_qty']})")
+    except Exception as e:
+        print(f"  [FAIL] Precision/qty      : {e}")
 
     try:
         test_price = 3.175e-05
