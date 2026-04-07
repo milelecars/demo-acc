@@ -628,7 +628,7 @@ async function loadTrades() {
     if (Array.isArray(data) && data.length > 0) {
       trades = data.map(t => ({
         symbol:     t.symbol,
-        strategy:   t.strategy || '',
+        strategy:   t.strategy?.startsWith('S1') ? 'S1' : t.strategy?.startsWith('S2') ? 'S2' : '',
         direction:  t.direction,
         openTime:   parseTimestamp(t.open_time),
         closeTime:  t.close_time ? parseTimestamp(t.close_time) : null,

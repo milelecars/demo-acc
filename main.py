@@ -14,9 +14,7 @@ app = Flask(__name__)
 
 TESTNET = os.environ.get('TESTNET', 'true').lower() == 'true'
 if TESTNET:
-    BINANCE_BASE = 'https://testnet.binancefuture.com/fapi'
-else:
-    BINANCE_BASE = 'https://fapi.binance.com/fapi'
+    BINANCE_BASE = 'https://demo-fapi.binance.com/fapi'  
 
 API_KEY    = os.environ.get('BINANCE_API_KEY', '')
 API_SECRET = os.environ.get('BINANCE_API_SECRET', '')
@@ -75,10 +73,15 @@ def proxy_fapi_position_risk():
 
 @app.route('/proxy/trades')
 def proxy_trades():
+    # Always query Supabase fresh so new columns (pnl_usdt etc.) are included
+    if manager:
+        rows = manager.supabase.select_all('trades')
+        if rows:
+            return jsonify(rows)
+    # fallback to in-memory
     if manager and manager.closed_positions:
         return jsonify(manager.closed_positions)
     return jsonify([])
-
 
 @app.route('/proxy/open_positions')
 def proxy_open_positions():
