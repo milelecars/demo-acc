@@ -210,6 +210,8 @@
 <div class="header">
   <div class="header-left">
     <div class="logo">Bot<span>Dash</span></div>
+    <span class="pill pill-futures">FUTURES</span>
+    <span class="pill pill-testnet" id="modeLabel">TESTNET</span>
     <div class="live-dot"></div>
   </div>
   <div class="header-right">
@@ -423,11 +425,12 @@ const WATCH_SYMS = [
 ];
 
 let allTrades      = [];
-let openPositions  = [];  // from /proxy/open_positions
+let openPositions  = [];
 let sortKey        = 'openTime';
 let sortAsc        = false;
 let dateFilter     = 'all';
 let refreshTmr     = null;
+let rawUsdtBalance = 0;   // raw API balance — P&L applied on top in updateStats()
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 async function apiFetch(url) {
@@ -471,7 +474,7 @@ function fmtTs(ms) {
 async function loadAll() {
   hideError();
   try {
-    await loadBalances();           // ← balances first
+    await loadBalances();   // must run first — sets rawUsdtBalance before updateStats() reads it
     await Promise.all([loadOpenPositions(), loadTrades(), loadBotStats()]);
     document.getElementById('lastUpd').textContent =
       'Updated ' + new Date().toLocaleString('en-GB', {
@@ -485,7 +488,6 @@ async function loadAll() {
 
 // ── Balances ──────────────────────────────────────────────────────────────────
 async function loadBalances() {
-  // Futures account uses /v2/account; assets[] not balances[]
   const data = await signedGet('/fapi/v2/account');
   const assets = (data.assets || []).filter(b =>
     parseFloat(b.walletBalance) + parseFloat(b.unrealizedProfit || 0) > 0.5
@@ -498,28 +500,35 @@ async function loadBalances() {
 
   document.getElementById('balCount').textContent = assets.length + ' assets';
 
+  // Store raw balance globally so updateStats() can apply P&L on top
   const usdt = assets.find(a=>a.asset==='USDT');
   if (usdt) {
-    const free = parseFloat(usdt.availableBalance || usdt.walletBalance);
+    rawUsdtBalance = parseFloat(usdt.availableBalance || usdt.walletBalance);
+    // Show raw balance initially — updateStats() will add P&L once trades load
     document.getElementById('statUsdt').textContent =
-      '$' + free.toLocaleString('en', {maximumFractionDigits:2});
+      '$' + rawUsdtBalance.toLocaleString('en', {maximumFractionDigits:2});
   }
 
   const list = document.getElementById('balanceList');
   if (!assets.length) { list.innerHTML = '<div class="empty">No balances</div>'; return; }
 
+  // Render wallet panel — USDT row gets a placeholder we'll update in updateStats()
   list.innerHTML = assets.map(b => {
     const wallet = parseFloat(b.walletBalance);
     const upnl   = parseFloat(b.unrealizedProfit || 0);
     return `
-      <div class="bal-row">
+      <div class="bal-row" data-asset="${b.asset}">
         <div class="bal-left">
           <div class="bal-icon">${b.asset.slice(0,4)}</div>
           <div class="bal-name">${b.asset}</div>
         </div>
         <div class="bal-amt">
-          <div class="bal-free">${fmt(wallet,4)}</div>
-          ${Math.abs(upnl)>0.001?`<div class="bal-lock ${upnl>=0?'c-green':'c-red'}">${upnl>=0?'+':''}${upnl.toFixed(4)} uPnL</div>`:''}
+          <div class="bal-free" id="walletAmt-${b.asset}">${b.asset === 'USDT'
+            ? rawUsdtBalance.toLocaleString('en', {minimumFractionDigits:2, maximumFractionDigits:2})
+            : fmt(wallet,4)}</div>
+          ${Math.abs(upnl)>0.001
+            ? `<div class="bal-lock ${upnl>=0?'c-green':'c-red'}">${upnl>=0?'+':''}${upnl.toFixed(4)} uPnL</div>`
+            : ''}
         </div>
       </div>`;
   }).join('');
@@ -657,10 +666,8 @@ async function loadTrades() {
 function parseTimestamp(s) {
   if (!s) return 0;
   if (typeof s === 'number') return s;
-  // Force UTC parsing by ensuring Z suffix
-  return new Date(
-    s.replace(' UTC', 'Z').replace(' ', 'T')
-  ).getTime() || 0;
+  // "2024-01-15 14:30 UTC" or ISO
+  return new Date(s.replace(' UTC', 'Z').replace(' ', 'T')).getTime() || 0;
 }
 
 // ── Futures order pairing fallback ────────────────────────────────────────────
@@ -768,13 +775,6 @@ function updateStats() {
 
   // Total P&L in USDT
   const totalPnlUsdt = closed.reduce((s,t) => s + (t.pnlUsdt || 0), 0);
-  // Apply cumulative P&L on top of raw API balance
-  const rawBalEl = document.getElementById('statUsdt');
-  const rawBal = parseFloat(rawBalEl.textContent.replace(/[$,]/g, '')) || 0;
-  if (rawBal > 0) {
-    const adjustedBal = rawBal + totalPnlUsdt;
-    rawBalEl.textContent = '$' + adjustedBal.toLocaleString('en', {maximumFractionDigits: 2});
-  }
   const totalPnlPct  = closed.reduce((s,t) => s + (t.pnlPct  || 0), 0);
   const pel = document.getElementById('statPnlUsdt');
   pel.textContent = fmtUsdt(totalPnlUsdt);
@@ -782,12 +782,24 @@ function updateStats() {
   document.getElementById('statPnlPct').textContent =
     (totalPnlPct >= 0 ? '+' : '') + totalPnlPct.toFixed(2) + '% cumulative';
 
-  // Today's P&L in USDT
+  // Apply P&L on top of raw API balance for header card + wallet panel
+  if (rawUsdtBalance > 0) {
+    const adjustedBal = rawUsdtBalance + totalPnlUsdt;
+    document.getElementById('statUsdt').textContent =
+      '$' + adjustedBal.toLocaleString('en', {minimumFractionDigits:2, maximumFractionDigits:2});
+    // Also update wallet panel USDT row
+    const walletAmtEl = document.getElementById('walletAmt-USDT');
+    if (walletAmtEl) {
+      walletAmtEl.textContent =
+        adjustedBal.toLocaleString('en', {minimumFractionDigits:2, maximumFractionDigits:2});
+    }
+  }
+
+  // Today's P&L — filter by closeTime in UAE timezone
   const todayStr = new Date().toLocaleDateString('en-GB', {timeZone:'Asia/Dubai'});
-  // Change openTime → closeTime for today filter
   const todayTrades = closed.filter(t =>
-      t.closeTime &&
-      new Date(t.closeTime).toLocaleDateString('en-GB', {timeZone:'Asia/Dubai'}) === todayStr
+    t.closeTime &&
+    new Date(t.closeTime).toLocaleDateString('en-GB', {timeZone:'Asia/Dubai'}) === todayStr
   );
   const todayPnl = todayTrades.reduce((s,t) => s + (t.pnlUsdt || 0), 0);
   const todayEl = document.getElementById('statToday');
