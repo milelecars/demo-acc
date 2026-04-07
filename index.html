@@ -471,7 +471,8 @@ function fmtTs(ms) {
 async function loadAll() {
   hideError();
   try {
-    await Promise.all([loadBalances(), loadOpenPositions(), loadTrades(), loadBotStats()]);
+    await loadBalances();           // ← balances first
+    await Promise.all([loadOpenPositions(), loadTrades(), loadBotStats()]);
     document.getElementById('lastUpd').textContent =
       'Updated ' + new Date().toLocaleString('en-GB', {
         timeZone:'Asia/Dubai', hour:'2-digit', minute:'2-digit', second:'2-digit'
@@ -767,6 +768,13 @@ function updateStats() {
 
   // Total P&L in USDT
   const totalPnlUsdt = closed.reduce((s,t) => s + (t.pnlUsdt || 0), 0);
+  // Apply cumulative P&L on top of raw API balance
+  const rawBalEl = document.getElementById('statUsdt');
+  const rawBal = parseFloat(rawBalEl.textContent.replace(/[$,]/g, '')) || 0;
+  if (rawBal > 0) {
+    const adjustedBal = rawBal + totalPnlUsdt;
+    rawBalEl.textContent = '$' + adjustedBal.toLocaleString('en', {maximumFractionDigits: 2});
+  }
   const totalPnlPct  = closed.reduce((s,t) => s + (t.pnlPct  || 0), 0);
   const pel = document.getElementById('statPnlUsdt');
   pel.textContent = fmtUsdt(totalPnlUsdt);
