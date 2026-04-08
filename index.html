@@ -210,8 +210,6 @@
 <div class="header">
   <div class="header-left">
     <div class="logo">Bot<span>Dash</span></div>
-    <span class="pill pill-futures">FUTURES</span>
-    <span class="pill pill-testnet" id="modeLabel">TESTNET</span>
     <div class="live-dot"></div>
   </div>
   <div class="header-right">
@@ -235,7 +233,7 @@
     <div class="stat-card">
       <div class="stat-label">USDT Balance</div>
       <div class="stat-value c-blue" id="statUsdt">--</div>
-      <div class="stat-sub">$5,000 start + net P&L</div>
+      <div class="stat-sub">Available in wallet</div>
     </div>
     <div class="stat-card">
       <div class="stat-label">Total P&amp;L (USDT)</div>
@@ -432,8 +430,7 @@ let sortKey        = 'openTime';
 let sortAsc        = false;
 let dateFilter     = 'all';
 let refreshTmr     = null;
-let rawUsdtBalance = 0;   // raw API balance — used for wallet panel only
-const STARTING_BALANCE = 5000;   // actual starting USDT — header card computed from this
+let rawUsdtBalance = 0;   // raw API balance — P&L applied on top in updateStats()
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 async function apiFetch(url) {
@@ -804,14 +801,16 @@ function updateStats() {
   document.getElementById('statPnlPct').textContent =
     (totalPnlPct >= 0 ? '+' : '') + totalPnlPct.toFixed(2) + '% gross · fees ' + fmtUsdt(-totalFeeUsdt);
 
-  // Header balance = starting balance + net P&L (Supabase-derived, not Binance API)
-  const adjustedBal = STARTING_BALANCE + netPnlUsdt;
-  document.getElementById('statUsdt').textContent =
-    '$' + adjustedBal.toLocaleString('en', {minimumFractionDigits:2, maximumFractionDigits:2});
-  const walletAmtEl = document.getElementById('walletAmt-USDT');
-  if (walletAmtEl) {
-    walletAmtEl.textContent =
-      adjustedBal.toLocaleString('en', {minimumFractionDigits:2, maximumFractionDigits:2});
+  // Apply net P&L on top of raw API balance
+  if (rawUsdtBalance > 0) {
+    const adjustedBal = rawUsdtBalance + netPnlUsdt;
+    document.getElementById('statUsdt').textContent =
+      '$' + adjustedBal.toLocaleString('en', {minimumFractionDigits:2, maximumFractionDigits:2});
+    const walletAmtEl = document.getElementById('walletAmt-USDT');
+    if (walletAmtEl) {
+      walletAmtEl.textContent =
+        adjustedBal.toLocaleString('en', {minimumFractionDigits:2, maximumFractionDigits:2});
+    }
   }
 
   // Today's P&L — filter by closeTime in UAE timezone
