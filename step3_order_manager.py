@@ -172,10 +172,18 @@ class BinanceClient:
     # ── Futures-specific helpers ──────────────────────────────────────────────
 
     def set_leverage(self, symbol: str, leverage: int) -> dict:
-        return self._post('/v1/leverage', {
-            'symbol':   symbol,
-            'leverage': leverage,
-        })
+        try:
+            return self._post('/v1/leverage', {
+                'symbol':   symbol,
+                'leverage': leverage,
+            })
+        except requests.exceptions.HTTPError as e:
+            body = e.response.text if e.response is not None else ''
+            if '-4028' in body:
+                # Leverage value not valid for this symbol — try lower leverage
+                log.warning(f"{symbol}: leverage {leverage}x not valid, trying 20x")
+                return self._post('/v1/leverage', {'symbol': symbol, 'leverage': 20})
+            raise
 
     def set_margin_type(self, symbol: str, margin_type: str = 'ISOLATED') -> dict:
         try:
@@ -183,10 +191,17 @@ class BinanceClient:
                 'symbol':     symbol,
                 'marginType': margin_type,
             })
-        except Exception as e:
-            if '-4046' in str(e):
+        except requests.exceptions.HTTPError as e:
+            body = e.response.text if e.response is not None else ''
+            if '-4046' in body:
+                # Already set to the requested margin type — not an error
                 log.debug(f"{symbol}: margin type already {margin_type}")
                 return {}
+            if '-1121' in body:
+                # Symbol doesn't exist on this futures endpoint
+                raise ValueError(f"{symbol} not listed on futures demo")
+            raise
+        except Exception:
             raise
 
     def get_symbol_info(self, symbol: str) -> dict:
@@ -556,6 +571,12 @@ class OrderManager:
                 self._pending_symbols.discard(symbol)
 
             self._log_trade_open(position)
+
+        except ValueError as e:
+            # Symbol not available on futures — skip silently
+            log.warning(f"[SKIP] {symbol}: {e}")
+            with self._lock:
+                self._pending_symbols.discard(symbol)
 
         except Exception as e:
             log.error(f"[ORDER] Failed to place trade for {symbol}: {e}", exc_info=True)

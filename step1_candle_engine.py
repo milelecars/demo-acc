@@ -65,41 +65,52 @@ ADX_PERIOD    = 14
 ATR_PERIOD    = 14
 MA44_PERIOD   = 44
 
-# REST and WebSocket endpoints
-# NOTE: Market data (candles, prices) always comes from LIVE Binance —
-#       it's public and requires no API key.
-# Trade execution goes to Testnet (fake money) or Live depending on TESTNET flag.
-# This is the standard pattern: real market data + paper trading on testnet.
+# REST and WebSocket endpoints — all futures, no spot
+# Market data comes from public Binance Futures (fapi) — no API key needed.
+# Trade execution goes to demo-fapi (testnet) or fapi (live).
 if TESTNET:
-    REST_BASE      = "https://testnet.binance.vision/api"   # for order placement
-    REST_DATA_BASE = "https://api.binance.com/api"          # for candle seeding
+    REST_BASE           = "https://demo-fapi.binance.com/fapi"   # order placement
 else:
-    REST_BASE      = "https://api.binance.com/api"
-    REST_DATA_BASE = "https://api.binance.com/api"
+    REST_BASE           = "https://fapi.binance.com/fapi"
 
-# WebSocket always uses live Binance (public market data, no auth needed)
-WS_BASE = "wss://stream.binance.com:9443/stream"
+REST_DATA_BASE = "https://fapi.binance.com/fapi"   # candle seeding (always live public)
 
-# Symbols to monitor — full backtest universe (85 symbols)
+# WebSocket — futures stream only
+WS_BASE = "wss://fstream.binance.com/stream"
+
+# All symbols in this list must exist on Binance Futures
+# All symbols use the futures stream — no spot stream
+
+# Symbols to monitor — 80 symbols verified against demo-fapi.binance.com
+# Removed (not on demo futures): CROUSDT, MNTUSDT, ICPUSDT, MKRUSDT, PUMPUSDT,
+#                                 NEXOUSDT, DCRUSDT, GNOUSDT, BTTUSDT, 2ZUSDT
+# Fixed prefixed tickers (futures uses 1000x denomination):
+#   SHIBUSDT→1000SHIBUSDT, PEPEUSDT→1000PEPEUSDT, BONKUSDT→1000BONKUSDT,
+#   FLOKIUSDT→1000FLOKIUSDT, LUNCUSDT→1000LUNCUSDT
 SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "SOLUSDT",
-    "TRXUSDT", "DOGEUSDT", "ADAUSDT", "HYPEUSDT", "BCHUSDT",
-    "LINKUSDT", "XMRUSDT", "XLMUSDT", "AVAXUSDT", "LTCUSDT",
-    "HBARUSDT", "SUIUSDT", "ZECUSDT", "SHIBUSDT", "TONUSDT",
-    "CROUSDT", "TAOUSDT", "DOTUSDT", "MNTUSDT", "UNIUSDT",
-    "AAVEUSDT", "ASTERUSDT", "NEARUSDT", "PEPEUSDT", "SKYUSDT",
-    "ICPUSDT", "ETCUSDT", "ONDOUSDT", "MKRUSDT", "WLDUSDT",
+    "TRXUSDT", "DOGEUSDT", "ADAUSDT", "BCHUSDT", "LINKUSDT",
+    "XMRUSDT", "XLMUSDT", "AVAXUSDT", "LTCUSDT", "HBARUSDT",
+    "SUIUSDT", "ZECUSDT", "1000SHIBUSDT", "TONUSDT", "TAOUSDT",
+    "DOTUSDT", "UNIUSDT", "AAVEUSDT", "ASTERUSDT", "NEARUSDT",
+    "1000PEPEUSDT", "SKYUSDT", "ETCUSDT", "ONDOUSDT", "WLDUSDT",
     "POLUSDT", "ENAUSDT", "RENDERUSDT", "ATOMUSDT", "TRUMPUSDT",
     "KASUSDT", "ALGOUSDT", "QNTUSDT", "APTUSDT", "FILUSDT",
-    "PUMPUSDT", "ZROUSDT", "VETUSDT", "ARBUSDT", "NEXOUSDT",
-    "JUPUSDT", "BONKUSDT", "PENGUUSDT", "CAKEUSDT", "VIRTUALUSDT",
-    "FETUSDT", "DCRUSDT", "STXUSDT", "SEIUSDT", "DASHUSDT",
-    "ETHFIUSDT", "XTZUSDT", "CHZUSDT", "GNOUSDT", "CRVUSDT",
-    "BTTUSDT", "IMXUSDT", "TIAUSDT", "INJUSDT", "SYRUPUSDT",
-    "FLOKIUSDT", "2ZUSDT", "JASMYUSDT", "PYTHUSDT", "GRTUSDT",
-    "IOTAUSDT", "OPUSDT", "LDOUSDT", "SANDUSDT", "ENSUSDT",
-    "BARDUSDT", "LUNCUSDT", "STRKUSDT", "TWTUSDT", "RUNEUSDT",
+    "ZROUSDT", "VETUSDT", "ARBUSDT", "JUPUSDT", "1000BONKUSDT",
+    "PENGUUSDT", "CAKEUSDT", "VIRTUALUSDT", "FETUSDT", "STXUSDT",
+    "SEIUSDT", "DASHUSDT", "ETHFIUSDT", "XTZUSDT", "CHZUSDT",
+    "CRVUSDT", "IMXUSDT", "TIAUSDT", "INJUSDT", "SYRUPUSDT",
+    "1000FLOKIUSDT", "JASMYUSDT", "PYTHUSDT", "GRTUSDT", "IOTAUSDT",
+    "OPUSDT", "LDOUSDT", "SANDUSDT", "ENSUSDT", "BARDUSDT",
+    "1000LUNCUSDT", "STRKUSDT", "TWTUSDT", "RUNEUSDT", "HYPEUSDT",
+    "XMRUSDT", "SUIUSDT",
 ]
+# Deduplicate while preserving order
+_seen = set(); _deduped = []
+for _s in SYMBOLS:
+    if _s not in _seen:
+        _seen.add(_s); _deduped.append(_s)
+SYMBOLS = _deduped
 
 # ============================================================================
 # LOGGING
@@ -345,10 +356,10 @@ class CandleStore:
 # ============================================================================
 
 def seed_symbol(symbol, store, limit=CANDLE_LIMIT):
-    """Fetch `limit` closed 15m candles from REST and load into store."""
+    """Fetch `limit` closed 15m candles from Binance Futures REST and load into store."""
     try:
         resp = requests.get(
-            f"{REST_DATA_BASE}/v3/klines",
+            f"{REST_DATA_BASE}/v1/klines",
             params={'symbol': symbol, 'interval': INTERVAL, 'limit': limit},
             timeout=15
         )
@@ -429,8 +440,8 @@ class CandleEngine:
         self._running = False
 
     def _ws_loop(self):
-        """Outer loop — reconnects on any error."""
-        import websocket   # imported here so missing dep gives clear error
+        """Outer loop — reconnects on any error. Single futures stream for all symbols."""
+        import websocket
 
         while self._running:
             streams = "/".join(f"{s.lower()}@kline_{INTERVAL}" for s in self.symbols)

@@ -89,11 +89,11 @@ S2_ATR_MAX_PCT    = 0.60              # ATR% < 0.60%
 S2_CONSEC_LOSS_MAX = 2                # losses before pause
 S2_PAUSE_SEC      = 8 * 3600          # 8h pause after consec losses
 
-# 4H MA44 direction gate (REST fetch)
+# 4H MA44 direction gate (REST fetch) — futures endpoint for all symbols
 H4_MA_PERIOD      = 44
 H4_SLOPE_BARS     = 4
 H4_CACHE_SEC      = 3600              # re-fetch 4H direction at most once per hour
-REST_DATA_BASE    = "https://api.binance.com/api"
+REST_DATA_BASE    = "https://fapi.binance.com/fapi"
 
 # ============================================================================
 # SIGNAL EVENT — the object passed to the order manager
@@ -208,7 +208,7 @@ class H4DirectionCache:
     def _fetch(self, symbol: str, end_ts_ms: int) -> Optional[bool]:
         try:
             resp = requests.get(
-                f"{REST_DATA_BASE}/v3/klines",
+                f"{REST_DATA_BASE}/v1/klines",
                 params={
                     'symbol':   symbol,
                     'interval': '4h',
