@@ -21,7 +21,6 @@ Run this file standalone to verify it connects and prints candle closes:
 
 Configuration (edit the block below):
   TESTNET = True   → uses testnet.binance.vision
-  TESTNET = False  → uses live api.binance.com  (careful!)
 """
 
 import json
