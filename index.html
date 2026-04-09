@@ -139,6 +139,25 @@
   thead th.sorted { color: var(--accent); }
   tbody tr { border-bottom: 1px solid var(--border); transition: background 0.12s; }
   tbody tr:hover { background: var(--bg); }
+
+  /* ── Expandable trade detail row ─────────────────────── */
+  tr.detail-row > td { padding: 0; background: var(--surface); }
+  .detail-panel {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 6px 20px;
+    padding: 10px 16px 14px 16px;
+    border-top: 1px solid var(--border);
+    border-bottom: 2px solid var(--accent);
+  }
+  .detail-item { display: flex; flex-direction: column; gap: 2px; }
+  .detail-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .detail-value { font-size: 12px; font-family: var(--mono); color: var(--text); font-weight: 500; }
+  tr.expandable { cursor: pointer; }
+  tr.expandable:hover td { background: color-mix(in srgb, var(--accent) 6%, var(--surface)) !important; }
+  tr.expanded > td { border-bottom: none !important; }
+  .expand-icon { display: inline-block; margin-left: 5px; font-size: 9px; color: var(--muted); transition: transform 0.15s ease; vertical-align: middle; }
+  tr.expanded .expand-icon { transform: rotate(90deg); }
   tbody tr:last-child { border-bottom: none; }
   tbody td { padding: 10px 14px; font-size: 13px; }
 
@@ -650,12 +669,17 @@ async function loadTrades() {
         return {
           symbol:      t.symbol,
           strategy:    t.strategy?.startsWith('S1') ? 'S1' : t.strategy?.startsWith('S2') ? 'S2' : '',
+          fullStrategy: t.strategy ?? null,
           direction:   t.direction,
           openTime:    parseTimestamp(t.open_time),
           closeTime:   t.close_time ? parseTimestamp(t.close_time) : null,
           signalPrice: t.signal_price ?? null,
+          signalTime:  t.signal_time ?? null,
           entryPrice:  t.entry_price,
           exitPrice:   t.outcome === 'WIN' ? t.tp_price : t.outcome === 'LOSS' ? t.sl_price : null,
+          slPrice:     t.sl_price ?? null,
+          tpPrice:     t.tp_price ?? null,
+          quantity:    t.quantity ?? null,
           outcome:     t.outcome,
           pnlPct:      t.pnl_pct ?? null,
           pnlUsdt:     t.pnl_usdt ?? null,
@@ -952,9 +976,12 @@ function renderTrades(trades) {
           : `<span class="pnl-neg">${t.pnlPct.toFixed(2)}%</span>`
       : `<span class="pnl-neu">--</span>`;
 
-    return `<tr>
+    const notional = (t.marginUsdt && t.leverage) ? (t.marginUsdt * t.leverage).toFixed(0) : '--';
+    const rowId    = `tr-${t.symbol}-${t.openTime || ''}`.replace(/[^a-z0-9-]/gi, '_');
+
+    return `<tr class="expandable" id="${rowId}" onclick="toggleDetail('${rowId}')">
       <td style="color:var(--muted);font-size:12px;font-family:var(--mono)">${openTs}${closeTs}</td>
-      <td class="mono"><strong>${t.symbol.replace('USDT','')}</strong><span style="color:var(--muted)">/USDT</span></td>
+      <td class="mono"><strong>${t.symbol.replace('USDT','')}</strong><span style="color:var(--muted)">/USDT</span><span class="expand-icon">▶</span></td>
       <td>${stag}</td>
       <td>${side}</td>
       <td class="mono">${fmtP(t.entryPrice)}</td>
@@ -964,8 +991,63 @@ function renderTrades(trades) {
       <td>${feeCell}</td>
       <td>${slipCell}</td>
       <td>${pnlPctCell}</td>
+    </tr>
+    <tr class="detail-row" id="${rowId}-detail" style="display:none">
+      <td colspan="11">
+        <div class="detail-panel">
+          <div class="detail-item">
+            <span class="detail-label">Margin</span>
+            <span class="detail-value">${t.marginUsdt != null ? '$' + t.marginUsdt.toFixed(2) : '--'}</span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">Leverage</span>
+            <span class="detail-value">${t.leverage != null ? t.leverage + 'x' : '--'}</span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">Notional</span>
+            <span class="detail-value">${notional !== '--' ? '$' + notional : '--'}</span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">Quantity</span>
+            <span class="detail-value">${t.quantity != null ? Number(t.quantity).toLocaleString() : '--'}</span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">Signal Price</span>
+            <span class="detail-value">${t.signalPrice != null ? fmtP(t.signalPrice) : '--'}</span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">Stop Loss</span>
+            <span class="detail-value" style="color:var(--red)">${t.slPrice != null ? fmtP(t.slPrice) : '--'}</span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">Take Profit</span>
+            <span class="detail-value" style="color:var(--green)">${t.tpPrice != null ? fmtP(t.tpPrice) : '--'}</span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">Strategy</span>
+            <span class="detail-value">${t.fullStrategy || t.strategy || '--'}</span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">Signal Time</span>
+            <span class="detail-value" style="font-size:11px">${t.signalTime ? t.signalTime.replace(' UTC','') : '--'}</span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">Risk : Reward</span>
+            <span class="detail-value">${t.fullStrategy === 'S1_EMA_CROSS' ? '1 : 3  (0.5% / 1.5%)' : t.fullStrategy === 'S2_MA44_BOUNCE' ? '1 : 3  (2.0% / 6.0%)' : '--'}</span>
+          </div>
+        </div>
+      </td>
     </tr>`;
   }).join('');
+}
+
+function toggleDetail(rowId) {
+  const row    = document.getElementById(rowId);
+  const detail = document.getElementById(rowId + '-detail');
+  if (!row || !detail) return;
+  const isOpen = detail.style.display !== 'none';
+  detail.style.display = isOpen ? 'none' : 'table-row';
+  row.classList.toggle('expanded', !isOpen);
 }
 
 function sortBy(key) {
