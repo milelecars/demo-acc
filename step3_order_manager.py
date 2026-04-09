@@ -216,7 +216,7 @@ class BinanceClient:
         Returns the maximum notional position size allowed for a symbol
         at the given leverage, using /v1/leverageBracket.
         Fixes -2027: Exceeded maximum allowable position at current leverage.
-        Falls back to 10,000 if the endpoint fails.
+        Falls back to 5,000 if the endpoint fails (conservative demo limit).
         """
         try:
             data = self._get('/v1/leverageBracket', {'symbol': symbol})
@@ -230,7 +230,7 @@ class BinanceClient:
             elif isinstance(data, dict):
                 brackets = data.get('brackets', [])
             if not brackets:
-                return 10000.0
+                return 5000.0
             # Find the bracket where leverage <= initialLeverage (highest leverage that fits)
             best = None
             for b in brackets:
@@ -241,7 +241,7 @@ class BinanceClient:
             return float(best.get('notionalCap', 10000))
         except Exception as e:
             log.warning(f"leverageBracket fetch failed for {symbol}: {e}")
-            return 10000.0
+            return 5000.0
 
     def get_ticker_price(self, symbol: str) -> float:
         data = self._get('/v1/ticker/price', {'symbol': symbol})
@@ -287,6 +287,7 @@ class BinanceClient:
         params = {
             'symbol':      symbol,
             'side':        side,
+            'algoType':    'CONDITIONAL',
             'orderType':   'TAKE_PROFIT',
             'quantity':    self._fmt_price(quantity),
             'price':       self._fmt_price(tp_price),
@@ -306,6 +307,7 @@ class BinanceClient:
         params = {
             'symbol':      symbol,
             'side':        side,
+            'algoType':    'CONDITIONAL',
             'orderType':   'STOP',
             'quantity':    self._fmt_price(quantity),
             'price':       self._fmt_price(sl_price),
