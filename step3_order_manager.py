@@ -157,7 +157,7 @@ class BinanceClient:
 
     def _post(self, path: str, params: dict):
         params = self._sign(params)
-        resp = self.session.post(f"{self.base_url}{path}", params=params, timeout=10)
+        resp = self.session.post(f"{self.base_url}{path}", data=params, timeout=10)
         if resp.status_code != 200:
             log.error(f"POST {path} failed {resp.status_code}: {resp.text}")
         resp.raise_for_status()
@@ -219,7 +219,8 @@ class BinanceClient:
         Falls back to 5,000 if the endpoint fails (conservative demo limit).
         """
         try:
-            data = self._get('/v1/leverageBracket', {'symbol': symbol})
+            # leverageBracket is a signed USER_DATA endpoint — requires API key + signature
+            data = self._get('/v1/leverageBracket', {'symbol': symbol}, signed=True)
             # Response is a list of {symbol, brackets:[{bracket, initialLeverage, notionalCap,...}]}
             brackets = None
             if isinstance(data, list):
@@ -270,9 +271,14 @@ class BinanceClient:
         return self._post('/v1/order', params)
 
     def _post_algo(self, path: str, params: dict):
-        """POST to algo order endpoint — required for TAKE_PROFIT/STOP since 2025-12-09."""
+        """POST to algo order endpoint — required for TAKE_PROFIT/STOP since 2025-12-09.
+        Uses data= (request body) per Binance docs: POST params go in body, not URL."""
         params = self._sign(params)
-        resp = self.session.post(f"{self.base_url}{path}", params=params, timeout=10)
+        resp = self.session.post(
+            f"{self.base_url}{path}",
+            data=params,    # body, not query string
+            timeout=10
+        )
         if resp.status_code != 200:
             log.error(f"POST {path} failed {resp.status_code}: {resp.text}")
         resp.raise_for_status()
@@ -281,40 +287,41 @@ class BinanceClient:
     def place_take_profit_order(self, symbol: str, side: str,
                                 quantity: float, tp_price: float) -> dict:
         """
-        TAKE_PROFIT via /v1/algoOrder — mandatory since Binance API change 2025-12-09.
-        /v1/order now returns -4120 for conditional order types.
+        TAKE_PROFIT via POST /fapi/v1/algoOrder.
+        Mandatory since Binance migrated conditional orders to Algo Service 2025-12-09.
+        Params per official docs: algoType + type (mandatory), triggerPrice, price, workingType.
         """
         params = {
-            'symbol':      symbol,
-            'side':        side,
-            'algoType':    'CONDITIONAL',
-            'orderType':   'TAKE_PROFIT',
-            'quantity':    self._fmt_price(quantity),
-            'price':       self._fmt_price(tp_price),
+            'symbol':       symbol,
+            'side':         side,
+            'algoType':     'CONDITIONAL',
+            'type':         'TAKE_PROFIT',     # mandatory per docs (not orderType)
+            'quantity':     self._fmt_price(quantity),
+            'price':        self._fmt_price(tp_price),
             'triggerPrice': self._fmt_price(tp_price),
-            'timeInForce': 'GTC',
-            'reduceOnly':  'true',
-            'workingType': 'CONTRACT_PRICE',
+            'timeInForce':  'GTC',
+            'reduceOnly':   'true',
+            'workingType':  'CONTRACT_PRICE',
         }
         return self._post_algo('/v1/algoOrder', params)
 
     def place_stop_loss_order(self, symbol: str, side: str,
                               quantity: float, sl_price: float) -> dict:
         """
-        STOP via /v1/algoOrder — mandatory since Binance API change 2025-12-09.
-        /v1/order now returns -4120 for conditional order types.
+        STOP via POST /fapi/v1/algoOrder.
+        Mandatory since Binance migrated conditional orders to Algo Service 2025-12-09.
         """
         params = {
-            'symbol':      symbol,
-            'side':        side,
-            'algoType':    'CONDITIONAL',
-            'orderType':   'STOP',
-            'quantity':    self._fmt_price(quantity),
-            'price':       self._fmt_price(sl_price),
+            'symbol':       symbol,
+            'side':         side,
+            'algoType':     'CONDITIONAL',
+            'type':         'STOP',            # mandatory per docs (not orderType)
+            'quantity':     self._fmt_price(quantity),
+            'price':        self._fmt_price(sl_price),
             'triggerPrice': self._fmt_price(sl_price),
-            'timeInForce': 'GTC',
-            'reduceOnly':  'true',
-            'workingType': 'CONTRACT_PRICE',
+            'timeInForce':  'GTC',
+            'reduceOnly':   'true',
+            'workingType':  'CONTRACT_PRICE',
         }
         return self._post_algo('/v1/algoOrder', params)
 
@@ -326,8 +333,15 @@ class BinanceClient:
         return self._get('/v1/algoOrder', {'algoId': algo_id}, signed=True)
 
     def cancel_algo_order(self, algo_id: int) -> dict:
-        """Cancel an algo order by algoId."""
-        return self._delete('/v1/algoOrder', {'algoId': algo_id})
+        """Cancel an algo order by algoId — DELETE /fapi/v1/algoOrder (signed)."""
+        params = self._sign({'algoId': algo_id})
+        resp = self.session.delete(
+            f"{self.base_url}/v1/algoOrder",
+            params=params,
+            timeout=10
+        )
+        resp.raise_for_status()
+        return resp.json()
 
     def get_order(self, symbol: str, order_id: int) -> dict:
         return self._get('/v1/order', {'symbol': symbol, 'orderId': order_id}, signed=True)
@@ -735,16 +749,23 @@ class OrderManager:
 
         for pos in positions:
             try:
-                # Algo orders use GET /v1/algoOrder (algoId), status field is algoStatus
+                # Algo orders use GET /v1/algoOrder (algoId)
+                # algoStatus values: NEW → TRIGGERING → TRIGGERED → FINISHED (executed) or CANCELED/EXPIRED
                 tp_order  = self.client.get_algo_order(pos.tp_order_id)
                 sl_order  = self.client.get_algo_order(pos.sl_order_id)
-                tp_filled = tp_order.get('algoStatus') in ('FILLED', 'PARTIALLY_FILLED')
-                sl_filled = sl_order.get('algoStatus') in ('FILLED', 'PARTIALLY_FILLED')
+                tp_filled = tp_order.get('algoStatus') == 'FINISHED'
+                sl_filled = sl_order.get('algoStatus') == 'FINISHED'
 
                 if not tp_filled and not sl_filled:
                     continue
 
                 outcome = 'WIN' if tp_filled else 'LOSS'
+
+                # actualPrice = actual fill price from matching engine (per docs)
+                filled_order = tp_order if tp_filled else sl_order
+                actual_exit  = float(filled_order.get('actualPrice') or 0)
+                if actual_exit == 0:
+                    actual_exit = pos.tp_price if tp_filled else pos.sl_price
 
                 try:
                     if tp_filled:
@@ -756,9 +777,9 @@ class OrderManager:
 
                 log.info(f"[CLOSED] {pos.symbol} {pos.strategy} {pos.direction} | "
                          f"outcome={outcome} | entry={pos.entry_price:.6f} "
-                         f"SL={pos.sl_price:.6f} TP={pos.tp_price:.6f}")
+                         f"exit={actual_exit:.6f} SL={pos.sl_price:.6f} TP={pos.tp_price:.6f}")
 
-                self._log_trade_close(pos, outcome)
+                self._log_trade_close(pos, outcome, exit_price=actual_exit)
 
                 with self._lock:
                     self._open_positions.pop(pos.symbol, None)
