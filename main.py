@@ -152,8 +152,8 @@ def main():
     print(f"""
 +------------------------------------------------------+
 |  DUAL STRATEGY BOT  --  Futures Edition              |
-|  Strategy 1 : EMA 9/26 Cross  $400 × 50x            |
-|  Strategy 2 : MA44 Bounce     $333 × 15x            |
+|  Strategy 1 : EMA 9/26 Cross  $200 × 20x            |
+|  Strategy 2 : MA44 Bounce     $166.5 × 15x          |
 |  Symbols    : {len(SYMBOLS)} coins                              |
 |  Timeframe  : 15m candles                            |
 |  Max Trades : 10 open at once                        |

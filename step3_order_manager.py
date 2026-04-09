@@ -5,8 +5,8 @@ Changes in this version:
   - Switched from Binance Spot to Binance USDT-M Futures (testnet & live)
   - Isolated margin mode per trade
   - Strategy-specific sizing:
-      S1 (EMA Cross)    → $400 margin at 50x leverage
-      S2 (MA44 Bounce)  → $333 margin at 15x leverage
+      S1 (EMA Cross)    → $200 margin at 20x leverage
+      S2 (MA44 Bounce)  → $166.5 margin at 15x leverage
   - Global cap: max 10 open positions at once (new signals ignored above limit)
   - Consecutive-loss counters per strategy exposed for dashboard
   - pnl_usdt stored alongside pnl_pct in trade log
@@ -51,11 +51,11 @@ if TESTNET:
 
 # Strategy-specific trade sizing  (sized for 5,000 USDT wallet)
 STRATEGY_CONFIG = {
-    'S1': {'margin_usdt': 200.0,  'leverage': 50},   # EMA Cross   → $10,000 notional
+    'S1': {'margin_usdt': 200.0,  'leverage': 20},   # EMA Cross   → $4,000 notional (reduced from 50x to avoid -2027/-4005)
     'S2': {'margin_usdt': 166.5,  'leverage': 15},   # MA44 Bounce → $2,497.5 notional
 }
 DEFAULT_MARGIN   = 200.0
-DEFAULT_LEVERAGE = 50
+DEFAULT_LEVERAGE = 20
 
 MAX_OPEN_POSITIONS = 10
 POLL_INTERVAL      = 15
@@ -211,6 +211,38 @@ class BinanceClient:
                 return s
         return {}
 
+    def get_max_notional(self, symbol: str, leverage: int) -> float:
+        """
+        Returns the maximum notional position size allowed for a symbol
+        at the given leverage, using /v1/leverageBracket.
+        Fixes -2027: Exceeded maximum allowable position at current leverage.
+        Falls back to 10,000 if the endpoint fails.
+        """
+        try:
+            data = self._get('/v1/leverageBracket', {'symbol': symbol})
+            # Response is a list of {symbol, brackets:[{bracket, initialLeverage, notionalCap,...}]}
+            brackets = None
+            if isinstance(data, list):
+                for item in data:
+                    if item.get('symbol') == symbol:
+                        brackets = item.get('brackets', [])
+                        break
+            elif isinstance(data, dict):
+                brackets = data.get('brackets', [])
+            if not brackets:
+                return 10000.0
+            # Find the bracket where leverage <= initialLeverage (highest leverage that fits)
+            best = None
+            for b in brackets:
+                if leverage <= b.get('initialLeverage', 0):
+                    best = b
+            if best is None:
+                best = brackets[-1]  # lowest leverage bracket
+            return float(best.get('notionalCap', 10000))
+        except Exception as e:
+            log.warning(f"leverageBracket fetch failed for {symbol}: {e}")
+            return 10000.0
+
     def get_ticker_price(self, symbol: str) -> float:
         data = self._get('/v1/ticker/price', {'symbol': symbol})
         return float(data['price'])
@@ -237,40 +269,63 @@ class BinanceClient:
             params['reduceOnly'] = 'true'
         return self._post('/v1/order', params)
 
+    def _post_algo(self, path: str, params: dict):
+        """POST to algo order endpoint — required for TAKE_PROFIT/STOP since 2025-12-09."""
+        params = self._sign(params)
+        resp = self.session.post(f"{self.base_url}{path}", params=params, timeout=10)
+        if resp.status_code != 200:
+            log.error(f"POST {path} failed {resp.status_code}: {resp.text}")
+        resp.raise_for_status()
+        return resp.json()
+
     def place_take_profit_order(self, symbol: str, side: str,
                                 quantity: float, tp_price: float) -> dict:
-        """TAKE_PROFIT order — compatible with demo-fapi (fixes Error -4120)."""
+        """
+        TAKE_PROFIT via /v1/algoOrder — mandatory since Binance API change 2025-12-09.
+        /v1/order now returns -4120 for conditional order types.
+        """
         params = {
             'symbol':      symbol,
             'side':        side,
-            'type':        'TAKE_PROFIT',
+            'orderType':   'TAKE_PROFIT',
             'quantity':    self._fmt_price(quantity),
             'price':       self._fmt_price(tp_price),
-            'stopPrice':   self._fmt_price(tp_price),
+            'triggerPrice': self._fmt_price(tp_price),
             'timeInForce': 'GTC',
             'reduceOnly':  'true',
             'workingType': 'CONTRACT_PRICE',
         }
-        return self._post('/v1/order', params)
+        return self._post_algo('/v1/algoOrder', params)
 
     def place_stop_loss_order(self, symbol: str, side: str,
                               quantity: float, sl_price: float) -> dict:
-        """STOP order — compatible with demo-fapi (fixes Error -4120)."""
+        """
+        STOP via /v1/algoOrder — mandatory since Binance API change 2025-12-09.
+        /v1/order now returns -4120 for conditional order types.
+        """
         params = {
             'symbol':      symbol,
             'side':        side,
-            'type':        'STOP',
+            'orderType':   'STOP',
             'quantity':    self._fmt_price(quantity),
             'price':       self._fmt_price(sl_price),
-            'stopPrice':   self._fmt_price(sl_price),
+            'triggerPrice': self._fmt_price(sl_price),
             'timeInForce': 'GTC',
             'reduceOnly':  'true',
             'workingType': 'CONTRACT_PRICE',
         }
-        return self._post('/v1/order', params)
+        return self._post_algo('/v1/algoOrder', params)
 
     def cancel_order(self, symbol: str, order_id: int) -> dict:
         return self._delete('/v1/order', {'symbol': symbol, 'orderId': order_id})
+
+    def get_algo_order(self, algo_id: int) -> dict:
+        """Query an algo order status by algoId — used for TP/SL monitoring."""
+        return self._get('/v1/algoOrder', {'algoId': algo_id}, signed=True)
+
+    def cancel_algo_order(self, algo_id: int) -> dict:
+        """Cancel an algo order by algoId."""
+        return self._delete('/v1/algoOrder', {'algoId': algo_id})
 
     def get_order(self, symbol: str, order_id: int) -> dict:
         return self._get('/v1/order', {'symbol': symbol, 'orderId': order_id}, signed=True)
@@ -294,15 +349,21 @@ class BinanceClient:
 
 class PrecisionCache:
 
+    CACHE_TTL = 24 * 3600   # refresh symbol info every 24 hours
+
     def __init__(self, client: BinanceClient):
         self._client = client
-        self._cache  = {}
+        self._cache  = {}          # symbol -> dict
+        self._fetched_at = {}      # symbol -> epoch float
         self._lock   = threading.Lock()
 
     def get(self, symbol: str) -> dict:
+        now = time.time()
         with self._lock:
             if symbol in self._cache:
-                return self._cache[symbol]
+                age = now - self._fetched_at.get(symbol, 0)
+                if age < self.CACHE_TTL:
+                    return self._cache[symbol]
 
         info    = self._client.get_symbol_info(symbol)
         filters = {f['filterType']: f for f in info.get('filters', [])}
@@ -327,15 +388,20 @@ class PrecisionCache:
 
         with self._lock:
             self._cache[symbol] = result
+            self._fetched_at[symbol] = time.time()
         return result
 
     def calc_quantity(self, symbol: str, price: float,
                       margin: float, leverage: int) -> float:
         """
-        Compute order quantity capped to symbol's maxQty.
+        Compute order quantity capped to both symbol's maxQty (LOT_SIZE)
+        and the max notional position allowed at the given leverage.
         Fixes Error -2027 (Exceeded maximum allowable position).
         """
         notional = margin * leverage
+        # Cap notional to what Binance allows at this leverage
+        max_notional = self._client.get_max_notional(symbol, leverage)
+        notional = min(notional, max_notional)
         raw_qty  = notional / price
         prec     = self.get(symbol)
         step     = prec['qty_step']
@@ -503,14 +569,29 @@ class OrderManager:
         leverage = cfg['leverage']
 
         try:
+            # Pre-flight balance check — prevents -2019 Margin Insufficient
+            available = self.client.get_usdt_balance()
+            if available < margin:
+                log.warning(f"[SKIP] {symbol}: insufficient balance "
+                            f"${available:.2f} < required ${margin:.2f}")
+                with self._lock:
+                    self._pending_symbols.discard(symbol)
+                return
+
             self.client.set_margin_type(symbol, 'ISOLATED')
             self.client.set_leverage(symbol, leverage)
 
             current_price = self.client.get_ticker_price(symbol)
             prec          = self.precision.get(symbol)
 
-            # Use calc_quantity — caps to maxQty (fixes Error -2027)
+            # Use calc_quantity — caps to both leverageBracket notional and LOT_SIZE maxQty
             qty = self.precision.calc_quantity(symbol, current_price, margin, leverage)
+
+            # Final hard cap against maxQty — catches any edge case where cache was stale
+            if qty > prec['max_qty']:
+                qty = math.floor(prec['max_qty'] / prec['qty_step']) * prec['qty_step']
+                qty = round(qty, prec['qty_decimals'])
+                log.warning(f"[QTY CAP] {symbol}: qty hard-capped to maxQty {qty}")
 
             if qty < prec['min_qty']:
                 log.warning(f"[SKIP] {symbol}: qty {qty} < min_qty {prec['min_qty']}")
@@ -539,11 +620,12 @@ class OrderManager:
 
             exit_side = 'SELL' if direction == 'LONG' else 'BUY'
 
-            # Uses TAKE_PROFIT / STOP with workingType (fixes Error -4120)
+            # Uses /v1/algoOrder (mandatory since Binance API change 2025-12-09)
+            # algoOrder returns algoId, not orderId
             tp_result   = self.client.place_take_profit_order(symbol, exit_side, qty, tp_price)
             sl_result   = self.client.place_stop_loss_order(symbol, exit_side, qty, sl_price)
-            tp_order_id = tp_result['orderId']
-            sl_order_id = sl_result['orderId']
+            tp_order_id = tp_result.get('algoId') or tp_result.get('orderId')
+            sl_order_id = sl_result.get('algoId') or sl_result.get('orderId')
 
             log.info(f"[ORDER] TP order #{tp_order_id} @ {tp_price:.6f} | "
                      f"SL order #{sl_order_id} @ {sl_price:.6f}")
@@ -578,6 +660,17 @@ class OrderManager:
             with self._lock:
                 self._pending_symbols.discard(symbol)
 
+        except requests.exceptions.HTTPError as e:
+            body = e.response.text if e.response is not None else ''
+            if '-2019' in body:
+                log.warning(f"[SKIP] {symbol}: insufficient margin in demo account — skipping trade")
+            elif '-4005' in body:
+                log.warning(f"[SKIP] {symbol}: quantity exceeds symbol max — skipping trade")
+            else:
+                log.error(f"[ORDER] Failed to place trade for {symbol}: {e}", exc_info=True)
+            with self._lock:
+                self._pending_symbols.discard(symbol)
+
         except Exception as e:
             log.error(f"[ORDER] Failed to place trade for {symbol}: {e}", exc_info=True)
             with self._lock:
@@ -600,10 +693,11 @@ class OrderManager:
 
         for pos in positions:
             try:
-                tp_order  = self.client.get_order(pos.symbol, pos.tp_order_id)
-                sl_order  = self.client.get_order(pos.symbol, pos.sl_order_id)
-                tp_filled = tp_order.get('status') in ('FILLED', 'PARTIALLY_FILLED')
-                sl_filled = sl_order.get('status') in ('FILLED', 'PARTIALLY_FILLED')
+                # Algo orders use GET /v1/algoOrder (algoId), status field is algoStatus
+                tp_order  = self.client.get_algo_order(pos.tp_order_id)
+                sl_order  = self.client.get_algo_order(pos.sl_order_id)
+                tp_filled = tp_order.get('algoStatus') in ('FILLED', 'PARTIALLY_FILLED')
+                sl_filled = sl_order.get('algoStatus') in ('FILLED', 'PARTIALLY_FILLED')
 
                 if not tp_filled and not sl_filled:
                     continue
@@ -612,9 +706,9 @@ class OrderManager:
 
                 try:
                     if tp_filled:
-                        self.client.cancel_order(pos.symbol, pos.sl_order_id)
+                        self.client.cancel_algo_order(pos.sl_order_id)
                     else:
-                        self.client.cancel_order(pos.symbol, pos.tp_order_id)
+                        self.client.cancel_algo_order(pos.tp_order_id)
                 except Exception as ce:
                     log.warning(f"Could not cancel remaining order for {pos.symbol}: {ce}")
 
