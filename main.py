@@ -152,8 +152,8 @@ def main():
     print(f"""
 +------------------------------------------------------+
 |  DUAL STRATEGY BOT  --  Futures Edition              |
-|  Strategy 1 : EMA 9/26 Cross  $200 × 20x            |
-|  Strategy 2 : MA44 Bounce     $166.5 × 15x          |
+|  Strategy 1 : EMA 9/26 Cross  $200 × up to 50x      |
+|  Strategy 2 : MA44 Bounce     $166.5 × up to 15x    |
 |  Symbols    : {len(SYMBOLS)} coins                              |
 |  Timeframe  : 15m candles                            |
 |  Max Trades : 10 open at once                        |
@@ -179,12 +179,12 @@ def main():
     manager._log_trade_open = _patched_open
 
     _orig_close = manager._log_trade_close
-    def _patched_close(pos, outcome):
-        _orig_close(pos, outcome)
+    def _patched_close(pos, outcome, exit_price=None):
+        _orig_close(pos, outcome, exit_price=exit_price)
         if alerts:
-            exit_price = pos.tp_price if outcome == 'WIN' else pos.sl_price
+            alert_exit = exit_price or (pos.tp_price if outcome == 'WIN' else pos.sl_price)
             alerts.on_trade_closed(pos.symbol, pos.strategy, pos.direction,
-                                   pos.entry_price, exit_price, outcome)
+                                   pos.entry_price, alert_exit, outcome)
     manager._log_trade_close = _patched_close
 
     detector.on_signal = on_signal_with_alert

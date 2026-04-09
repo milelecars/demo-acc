@@ -51,11 +51,11 @@ if TESTNET:
 
 # Strategy-specific trade sizing  (sized for 5,000 USDT wallet)
 STRATEGY_CONFIG = {
-    'S1': {'margin_usdt': 200.0,  'leverage': 20},   # EMA Cross   → $4,000 notional (reduced from 50x to avoid -2027/-4005)
-    'S2': {'margin_usdt': 166.5,  'leverage': 15},   # MA44 Bounce → $2,497.5 notional
+    'S1': {'margin_usdt': 200.0,  'leverage': 50},   # EMA Cross   — target 50x, dynamic resolution caps if needed
+    'S2': {'margin_usdt': 166.5,  'leverage': 15},   # MA44 Bounce — target 15x, dynamic resolution caps if needed
 }
 DEFAULT_MARGIN   = 200.0
-DEFAULT_LEVERAGE = 20
+DEFAULT_LEVERAGE = 50
 
 MAX_OPEN_POSITIONS = 10
 POLL_INTERVAL      = 15
@@ -409,23 +409,61 @@ class PrecisionCache:
 
     def calc_quantity(self, symbol: str, price: float,
                       margin: float, leverage: int) -> float:
+        """Legacy wrapper — use resolve_order_params for full dynamic logic."""
+        qty, _ = self.resolve_order_params(symbol, price, margin, leverage)
+        return qty
+
+    def resolve_order_params(self, symbol: str, price: float,
+                             margin: float, target_leverage: int) -> tuple:
         """
-        Compute order quantity capped to both symbol's maxQty (LOT_SIZE)
-        and the max notional position allowed at the given leverage.
-        Fixes Error -2027 (Exceeded maximum allowable position).
+        Resolve the actual quantity and leverage for an order, implementing
+        the dynamic margin logic:
+
+          1. Use target_leverage unless Binance caps it lower (leverageBracket)
+          2. Compute notional = margin * actual_leverage
+          3. Compute qty = notional / price
+          4. If qty > LOT_SIZE maxQty: cap qty, keep margin, back-calc leverage
+          5. Return (qty, actual_leverage) — caller must set_leverage(actual_leverage)
+
+        This ensures $200/$167 margin is always fully deployed.
         """
-        notional = margin * leverage
-        # Cap notional to what Binance allows at this leverage
-        max_notional = self._client.get_max_notional(symbol, leverage)
-        notional = min(notional, max_notional)
+        prec = self.get(symbol)
+        step = prec['qty_step']
+        decimals = prec['qty_decimals']
+        max_qty = prec['max_qty']
+
+        # Step 1: respect Binance's max leverage for this symbol
+        max_notional = self._client.get_max_notional(symbol, target_leverage)
+
+        # Find actual max leverage allowed: what leverage makes notional = max_notional?
+        # actual_lev = max_notional / margin  (capped at target)
+        bracket_max_lev = int(max_notional / margin) if margin > 0 else target_leverage
+        actual_leverage = min(target_leverage, bracket_max_lev)
+        actual_leverage = max(actual_leverage, 1)  # floor at 1x
+
+        # Step 2: compute notional and raw qty
+        notional = margin * actual_leverage
         raw_qty  = notional / price
-        prec     = self.get(symbol)
-        step     = prec['qty_step']
-        max_qty  = prec['max_qty']
-        raw_qty  = min(raw_qty, max_qty)
-        # floor to stepSize using math.floor to avoid floating-point overshoot
+
+        # Step 3: floor to stepSize
         qty = math.floor(raw_qty / step) * step
-        return round(qty, prec['qty_decimals'])
+        qty = round(qty, decimals)
+
+        # Step 4: if qty still exceeds LOT_SIZE maxQty, cap it and back-calc leverage
+        if qty > max_qty:
+            qty = math.floor(max_qty / step) * step
+            qty = round(qty, decimals)
+            # Back-calculate leverage from capped qty, keeping margin fixed
+            capped_notional = qty * price
+            actual_leverage = max(1, round(capped_notional / margin))
+            log.warning(f"[QTY CAP] {symbol}: qty capped to {qty} (maxQty={max_qty}), "
+                        f"leverage back-calc to {actual_leverage}x "
+                        f"(notional=${capped_notional:.0f}, margin=${margin})")
+
+        log.debug(f"[RESOLVE] {symbol}: target={target_leverage}x → actual={actual_leverage}x | "
+                  f"margin=${margin} notional=${qty*price:.0f} qty={qty}")
+
+        return qty, actual_leverage
 
     def round_price(self, symbol: str, price: float) -> float:
         p    = self.get(symbol)
@@ -595,19 +633,24 @@ class OrderManager:
                 return
 
             self.client.set_margin_type(symbol, 'ISOLATED')
-            self.client.set_leverage(symbol, leverage)
+            self.client.set_leverage(symbol, leverage)  # initial set to target
 
             current_price = self.client.get_ticker_price(symbol)
             prec          = self.precision.get(symbol)
 
-            # Use calc_quantity — caps to both leverageBracket notional and LOT_SIZE maxQty
-            qty = self.precision.calc_quantity(symbol, current_price, margin, leverage)
+            # Resolve qty and actual leverage using dynamic margin logic:
+            # - Caps leverage to bracket maximum for this symbol
+            # - Caps qty to LOT_SIZE maxQty
+            # - Back-calculates leverage if qty is capped, keeping full margin deployed
+            qty, actual_leverage = self.precision.resolve_order_params(
+                symbol, current_price, margin, leverage
+            )
 
-            # Final hard cap against maxQty — catches any edge case where cache was stale
-            if qty > prec['max_qty']:
-                qty = math.floor(prec['max_qty'] / prec['qty_step']) * prec['qty_step']
-                qty = round(qty, prec['qty_decimals'])
-                log.warning(f"[QTY CAP] {symbol}: qty hard-capped to maxQty {qty}")
+            # If actual leverage differs from target, re-set it on Binance
+            if actual_leverage != leverage:
+                log.info(f"[LEVERAGE] {symbol}: {leverage}x → {actual_leverage}x "
+                         f"(constrained by bracket/maxQty, margin ${margin} preserved)")
+                self.client.set_leverage(symbol, actual_leverage)
 
             if qty < prec['min_qty']:
                 log.warning(f"[SKIP] {symbol}: qty {qty} < min_qty {prec['min_qty']}")
@@ -616,8 +659,9 @@ class OrderManager:
                 return
 
             entry_side = 'BUY' if direction == 'LONG' else 'SELL'
+            lev_note = f" (target {leverage}x)" if actual_leverage != leverage else ""
             log.info(f"[ORDER] Placing {entry_side} MARKET {qty} {symbol} @ ~{current_price:.6f} "
-                     f"[{strategy} margin=${margin} lev={leverage}x]")
+                     f"[{strategy} margin=${margin} lev={actual_leverage}x{lev_note}]")
 
             entry_result   = self.client.place_market_order(symbol, entry_side, qty)
             entry_order_id = entry_result['orderId']
@@ -670,7 +714,7 @@ class OrderManager:
                     tp_price       = actual_entry * (1 + 0.015) if direction == 'LONG' else actual_entry * (1 - 0.015),
                     quantity       = qty,
                     margin_usdt    = margin,
-                    leverage       = leverage,
+                    leverage       = actual_leverage,
                     tp_order_id    = 0,
                     sl_order_id    = 0,
                     entry_order_id = entry_order_id,
@@ -695,7 +739,7 @@ class OrderManager:
                 tp_price       = tp_price,
                 quantity       = qty,
                 margin_usdt    = margin,
-                leverage       = leverage,
+                leverage       = actual_leverage,
                 tp_order_id    = tp_order_id,
                 sl_order_id    = sl_order_id,
                 entry_order_id = entry_order_id,
