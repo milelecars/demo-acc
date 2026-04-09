@@ -623,14 +623,54 @@ class OrderManager:
             exit_side = 'SELL' if direction == 'LONG' else 'BUY'
 
             # Uses /v1/algoOrder (mandatory since Binance API change 2025-12-09)
-            # algoOrder returns algoId, not orderId
-            tp_result   = self.client.place_take_profit_order(symbol, exit_side, qty, tp_price)
-            sl_result   = self.client.place_stop_loss_order(symbol, exit_side, qty, sl_price)
-            tp_order_id = tp_result.get('algoId') or tp_result.get('orderId')
-            sl_order_id = sl_result.get('algoId') or sl_result.get('orderId')
+            # If TP/SL placement fails after entry fills, close immediately and log to DB
+            try:
+                tp_result   = self.client.place_take_profit_order(symbol, exit_side, qty, tp_price)
+                sl_result   = self.client.place_stop_loss_order(symbol, exit_side, qty, sl_price)
+                tp_order_id = tp_result.get('algoId') or tp_result.get('orderId')
+                sl_order_id = sl_result.get('algoId') or sl_result.get('orderId')
 
-            log.info(f"[ORDER] TP order #{tp_order_id} @ {tp_price:.6f} | "
-                     f"SL order #{sl_order_id} @ {sl_price:.6f}")
+                log.info(f"[ORDER] TP order #{tp_order_id} @ {tp_price:.6f} | "
+                         f"SL order #{sl_order_id} @ {sl_price:.6f}")
+
+            except Exception as tp_sl_err:
+                # Entry is already filled — position is live and unprotected
+                # Emergency: close immediately with a market order, then log to DB
+                log.error(f"[EMERGENCY] {symbol}: TP/SL placement failed after entry fill — "
+                          f"closing position immediately. Error: {tp_sl_err}")
+                try:
+                    close_result = self.client.place_market_order(symbol, exit_side, qty)
+                    exit_price   = float(close_result.get('avgPrice', 0) or actual_entry)
+                    log.info(f"[EMERGENCY] {symbol}: position closed @ {exit_price:.6f}")
+                except Exception as close_err:
+                    log.error(f"[EMERGENCY] {symbol}: FAILED to close position: {close_err}")
+                    exit_price = actual_entry  # best guess for DB record
+
+                # Log to DB as a MANUAL_CLOSE so it appears in dashboard
+                emergency_pos = OpenPosition(
+                    symbol         = symbol,
+                    strategy       = strategy,
+                    direction      = direction,
+                    entry_price    = actual_entry,
+                    sl_price       = actual_entry * (1 - 0.005) if direction == 'LONG' else actual_entry * (1 + 0.005),
+                    tp_price       = actual_entry * (1 + 0.015) if direction == 'LONG' else actual_entry * (1 - 0.015),
+                    quantity       = qty,
+                    margin_usdt    = margin,
+                    leverage       = leverage,
+                    tp_order_id    = 0,
+                    sl_order_id    = 0,
+                    entry_order_id = entry_order_id,
+                    signal_ts      = signal.signal_ts,
+                    signal_time    = signal.signal_time,
+                    signal_price   = signal.entry_price,
+                )
+                self._log_trade_close(emergency_pos, 'MANUAL_CLOSE', exit_price=exit_price)
+
+                with self._lock:
+                    self._pending_symbols.discard(symbol)
+                if detector:
+                    detector.on_trade_closed(symbol, strategy, 'LOSS')
+                return
 
             position = OpenPosition(
                 symbol         = symbol,
@@ -758,18 +798,26 @@ class OrderManager:
                  f"entry={pos.entry_price:.6f} SL={pos.sl_price:.6f} TP={pos.tp_price:.6f} "
                  f"qty={pos.quantity} margin=${pos.margin_usdt} lev={pos.leverage}x")
 
-    def _log_trade_close(self, pos: OpenPosition, outcome: str):
+    def _log_trade_close(self, pos: OpenPosition, outcome: str, exit_price: float = None):
         close_time = datetime.now(tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
 
         if outcome == 'WIN':
-            pnl_pct = (pos.tp_price - pos.entry_price) / pos.entry_price * 100 \
+            exit_p  = exit_price or pos.tp_price
+            pnl_pct = (exit_p - pos.entry_price) / pos.entry_price * 100 \
                       if pos.direction == 'LONG' else \
-                      (pos.entry_price - pos.tp_price) / pos.entry_price * 100
+                      (pos.entry_price - exit_p) / pos.entry_price * 100
         elif outcome == 'LOSS':
-            pnl_pct = (pos.sl_price - pos.entry_price) / pos.entry_price * 100 \
+            exit_p  = exit_price or pos.sl_price
+            pnl_pct = (exit_p - pos.entry_price) / pos.entry_price * 100 \
                       if pos.direction == 'LONG' else \
-                      (pos.entry_price - pos.sl_price) / pos.entry_price * 100
+                      (pos.entry_price - exit_p) / pos.entry_price * 100
+        elif outcome == 'MANUAL_CLOSE':
+            exit_p  = exit_price or pos.entry_price
+            pnl_pct = (exit_p - pos.entry_price) / pos.entry_price * 100 \
+                      if pos.direction == 'LONG' else \
+                      (pos.entry_price - exit_p) / pos.entry_price * 100
         else:
+            exit_p  = exit_price or pos.entry_price
             pnl_pct = 0.0
 
         notional = pos.margin_usdt * pos.leverage
