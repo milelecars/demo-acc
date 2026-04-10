@@ -65,21 +65,28 @@ ADX_PERIOD    = 14
 ATR_PERIOD    = 14
 MA44_PERIOD   = 44
 
-# REST and WebSocket endpoints — all futures, no spot
-# Market data comes from public Binance Futures (fapi) — no API key needed.
-# Trade execution goes to demo-fapi (testnet) or fapi (live).
+# REST and WebSocket endpoints
+# NOTE: 1000x-prefixed symbols (1000SHIBUSDT etc.) only exist on futures.
+#       We use the futures market data endpoint for seeding and the futures
+#       WebSocket stream for live candles. All other symbols use spot.
 if TESTNET:
-    REST_BASE           = "https://demo-fapi.binance.com/fapi"   # order placement
+    REST_BASE           = "https://testnet.binance.vision/api"
+    REST_DATA_BASE      = "https://api.binance.com/api"          # spot candle seeding
+    REST_FUTS_DATA_BASE = "https://fapi.binance.com/fapi"        # futures candle seeding
 else:
-    REST_BASE           = "https://fapi.binance.com/fapi"
+    REST_BASE           = "https://api.binance.com/api"
+    REST_DATA_BASE      = "https://api.binance.com/api"
+    REST_FUTS_DATA_BASE = "https://fapi.binance.com/fapi"
 
-REST_DATA_BASE = "https://fapi.binance.com/fapi"   # candle seeding (always live public)
+# Symbols that only exist on futures (1000x denomination)
+FUTURES_ONLY_SYMBOLS = {
+    "1000SHIBUSDT", "1000PEPEUSDT", "1000BONKUSDT",
+    "1000FLOKIUSDT", "1000LUNCUSDT",
+}
 
-# WebSocket — futures stream only
-WS_BASE = "wss://fstream.binance.com/stream"
-
-# All symbols in this list must exist on Binance Futures
-# All symbols use the futures stream — no spot stream
+# WebSocket bases
+WS_SPOT_BASE = "wss://stream.binance.com:9443/stream"
+WS_FUTS_BASE = "wss://fstream.binance.com/stream"
 
 # Symbols to monitor — 80 symbols verified against demo-fapi.binance.com
 # Removed (not on demo futures): CROUSDT, MNTUSDT, ICPUSDT, MKRUSDT, PUMPUSDT,
@@ -356,10 +363,16 @@ class CandleStore:
 # ============================================================================
 
 def seed_symbol(symbol, store, limit=CANDLE_LIMIT):
-    """Fetch `limit` closed 15m candles from Binance Futures REST and load into store."""
+    """Fetch `limit` closed 15m candles from REST and load into store."""
     try:
+        # 1000x-prefixed symbols only exist on futures endpoint
+        if symbol in FUTURES_ONLY_SYMBOLS:
+            url = f"{REST_FUTS_DATA_BASE}/v1/klines"
+        else:
+            url = f"{REST_DATA_BASE}/v3/klines"
+
         resp = requests.get(
-            f"{REST_DATA_BASE}/v1/klines",
+            url,
             params={'symbol': symbol, 'interval': INTERVAL, 'limit': limit},
             timeout=15
         )
@@ -434,19 +447,49 @@ class CandleEngine:
         seed_all(self.symbols, self.store)
 
         self._running = True
+
+        # Split symbols into spot and futures streams
+        self._spot_syms = [s for s in self.symbols if s not in FUTURES_ONLY_SYMBOLS]
+        self._futs_syms = [s for s in self.symbols if s in FUTURES_ONLY_SYMBOLS]
+
+        # Run futures WebSocket in background thread if needed
+        if self._futs_syms:
+            ft = threading.Thread(target=self._futs_ws_loop, daemon=True)
+            ft.start()
+
+        # Spot WebSocket runs in main thread (blocking)
         self._ws_loop()
+
+    def _futs_ws_loop(self):
+        """Futures WebSocket loop for 1000x symbols."""
+        import websocket
+        while self._running:
+            streams = "/".join(f"{s.lower()}@kline_{INTERVAL}" for s in self._futs_syms)
+            url     = f"{WS_FUTS_BASE}?streams={streams}"
+            log.info(f"Connecting Futures WebSocket ({len(self._futs_syms)} streams)...")
+            ws = websocket.WebSocketApp(
+                url,
+                on_message = self._on_message,
+                on_error   = self._on_error,
+                on_close   = lambda ws, c, m: None,
+                on_open    = lambda ws: log.info("Futures WebSocket connected [OK]"),
+            )
+            ws.run_forever(ping_interval=20, ping_timeout=10)
+            if self._running:
+                log.warning(f"Futures WebSocket dropped. Reconnecting in {RECONNECT_SEC}s...")
+                time.sleep(RECONNECT_SEC)
 
     def stop(self):
         self._running = False
 
     def _ws_loop(self):
-        """Outer loop — reconnects on any error. Single futures stream for all symbols."""
+        """Outer loop — reconnects on any error. Handles spot symbols only."""
         import websocket
 
         while self._running:
-            streams = "/".join(f"{s.lower()}@kline_{INTERVAL}" for s in self.symbols)
-            url     = f"{WS_BASE}?streams={streams}"
-            log.info(f"Connecting WebSocket ({len(self.symbols)} streams)...")
+            streams = "/".join(f"{s.lower()}@kline_{INTERVAL}" for s in self._spot_syms)
+            url     = f"{WS_SPOT_BASE}?streams={streams}"
+            log.info(f"Connecting WebSocket ({len(self._spot_syms)} streams)...")
 
             ws = websocket.WebSocketApp(
                 url,
