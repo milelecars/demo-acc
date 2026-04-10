@@ -494,7 +494,8 @@ async function loadAll() {
   hideError();
   try {
     await loadBalances();   // must run first — sets rawUsdtBalance before updateStats() reads it
-    await Promise.all([loadOpenPositions(), loadTrades(), loadBotStats()]);
+    await Promise.all([loadTrades(), loadBotStats()]);
+    await loadOpenPositions();  // runs after loadTrades so allTrades has DB OPEN rows to merge
     document.getElementById('lastUpd').textContent =
       'Updated ' + new Date().toLocaleString('en-GB', {
         timeZone:'Asia/Dubai', hour:'2-digit', minute:'2-digit', second:'2-digit'
@@ -553,9 +554,6 @@ async function loadBalances() {
           <div class="bal-free" id="walletAmt-${b.asset}">${b.asset === 'USDT'
             ? rawUsdtBalance.toLocaleString('en', {minimumFractionDigits:2, maximumFractionDigits:2})
             : fmt(wallet,4)}</div>
-          ${Math.abs(upnl)>0.001
-            ? `<div class="bal-lock ${upnl>=0?'c-green':'c-red'}">${upnl>=0?'+':''}${upnl.toFixed(4)} uPnL</div>`
-            : ''}
         </div>
       </div>`;
   }).join('');
@@ -567,9 +565,33 @@ async function loadOpenPositions() {
     const data = await apiFetch(PROXY + '/open_positions');
     openPositions = Array.isArray(data) ? data : [];
   } catch(e) {
-    // fallback: try Futures positionRisk
     openPositions = [];
   }
+
+  // Merge with DB OPEN rows — catches positions that survived a redeploy
+  // (bot memory is cleared on restart but DB OPEN rows persist)
+  const dbOpenSymbols = new Set(openPositions.map(p => p.symbol));
+  const dbOpenRows = allTrades.filter(t => t.outcome === 'OPEN');
+  for (const row of dbOpenRows) {
+    const sym = row.symbol?.replace('USDT','') + 'USDT';
+    if (!dbOpenSymbols.has(sym) && !dbOpenSymbols.has(row.symbol)) {
+      // Bot memory doesn't have this position — reconstruct from DB row
+      openPositions.push({
+        symbol:      row.symbol,
+        strategy:    row.fullStrategy || row.strategy,
+        direction:   row.direction,
+        entry_price: row.entryPrice,
+        sl_price:    row.slPrice,
+        tp_price:    row.tpPrice,
+        quantity:    row.quantity,
+        margin_usdt: row.marginUsdt,
+        leverage:    row.leverage,
+        open_time:   row.openTime ? new Date(row.openTime).toISOString().replace('T',' ').slice(0,16) + ' UTC' : null,
+        _from_db:    true,   // flag: no live price available
+      });
+    }
+  }
+
   document.getElementById('statOpen').textContent = openPositions.length;
   renderOpenPositions();
 }
@@ -620,7 +642,7 @@ function renderOpenPositions() {
           <div class="pos-prices">
             <span>TP <span class="pos-tp">${fmtP(pos.tp_price)}</span></span>
             <span>SL <span class="pos-sl">${fmtP(pos.sl_price)}</span></span>
-            <span style="margin-left:auto;color:var(--muted);font-size:11px">${pos.open_time?.replace(' UTC','') || ''}</span>
+            <span style="margin-left:auto;color:var(--muted);font-size:11px">${pos.open_time ? fmtTs(new Date(pos.open_time.replace(' UTC','+00:00')).getTime()) : ''}</span>
           </div>
         </div>`;
     }).join('')
@@ -707,6 +729,8 @@ async function loadTrades() {
   // Binance allOrders fallback disabled — Supabase is the sole source of truth.
   // Only closed trades are logged; raw Binance order pairing produces incomplete data.
 
+  // OPEN rows stay in allTrades for loadOpenPositions to merge,
+  // but are excluded from trade history table via applyFilters
   allTrades = trades.sort((a, b) => b.openTime - a.openTime);
   updateStats();
   applyFilters();
@@ -907,6 +931,7 @@ function applyFilters() {
   const DAY = 86400000, WEEK = 7 * DAY;
 
   let list = allTrades.filter(t => {
+    if (t.outcome === 'OPEN')                            return false; // shown in Open Positions, not here
     if (sym   && !t.symbol.includes(sym))               return false;
     if (out   && t.outcome   !== out)                   return false;
     if (dir   && t.direction !== dir)                   return false;
