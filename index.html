@@ -510,12 +510,23 @@ async function loadAll() {
 async function loadBalances() {
   const data = await signedGet('/fapi/v2/account');
 
-  // Try top-level availableBalance first (some demo accounts return it here)
+  // Top-level fields present on some demo accounts
   const topLevelUsdt = parseFloat(data.availableBalance || data.totalWalletBalance || 0);
 
-  const assets = (data.assets || []).filter(b =>
+  let assets = (data.assets || []).filter(b =>
     parseFloat(b.walletBalance) + parseFloat(b.unrealizedProfit || 0) > 0.01
   );
+
+  // If assets array is empty but top-level balance exists, synthesize a USDT row
+  if (!assets.length && topLevelUsdt > 0) {
+    assets = [{
+      asset:             'USDT',
+      walletBalance:     String(topLevelUsdt),
+      availableBalance:  String(topLevelUsdt),
+      unrealizedProfit:  '0',
+    }];
+  }
+
   assets.sort((a,b) => {
     if (a.asset==='USDT') return -1;
     if (b.asset==='USDT') return 1;
