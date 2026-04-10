@@ -508,8 +508,12 @@ async function loadAll() {
 // ── Balances ──────────────────────────────────────────────────────────────────
 async function loadBalances() {
   const data = await signedGet('/fapi/v2/account');
+
+  // Try top-level availableBalance first (some demo accounts return it here)
+  const topLevelUsdt = parseFloat(data.availableBalance || data.totalWalletBalance || 0);
+
   const assets = (data.assets || []).filter(b =>
-    parseFloat(b.walletBalance) + parseFloat(b.unrealizedProfit || 0) > 0.5
+    parseFloat(b.walletBalance) + parseFloat(b.unrealizedProfit || 0) > 0.01
   );
   assets.sort((a,b) => {
     if (a.asset==='USDT') return -1;
@@ -523,7 +527,11 @@ async function loadBalances() {
   const usdt = assets.find(a=>a.asset==='USDT');
   if (usdt) {
     rawUsdtBalance = parseFloat(usdt.availableBalance || usdt.walletBalance);
-    // Show raw balance initially — updateStats() will add P&L once trades load
+  } else if (topLevelUsdt > 0) {
+    // Fallback: use top-level balance if assets array doesn't have USDT
+    rawUsdtBalance = topLevelUsdt;
+  }
+  if (rawUsdtBalance > 0) {
     document.getElementById('statUsdt').textContent =
       '$' + rawUsdtBalance.toLocaleString('en', {maximumFractionDigits:2});
   }
