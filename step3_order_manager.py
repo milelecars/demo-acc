@@ -180,9 +180,16 @@ class BinanceClient:
         except requests.exceptions.HTTPError as e:
             body = e.response.text if e.response is not None else ''
             if '-4028' in body:
-                # Leverage value not valid for this symbol — try lower leverage
-                log.warning(f"{symbol}: leverage {leverage}x not valid, trying 20x")
-                return self._post('/v1/leverage', {'symbol': symbol, 'leverage': 20})
+                # Leverage not valid — step down through common levels until accepted
+                log.warning(f"{symbol}: leverage {leverage}x not valid, stepping down...")
+                fallbacks = [l for l in [50,40,33,25,20,15,10,5,3,1] if l < leverage]
+                for fallback in fallbacks:
+                    try:
+                        result = self._post('/v1/leverage', {'symbol': symbol, 'leverage': fallback})
+                        log.warning(f"{symbol}: leverage accepted at {fallback}x")
+                        return result
+                    except requests.exceptions.HTTPError:
+                        continue
             raise
 
     def set_margin_type(self, symbol: str, margin_type: str = 'ISOLATED') -> dict:
@@ -416,52 +423,50 @@ class PrecisionCache:
     def resolve_order_params(self, symbol: str, price: float,
                              margin: float, target_leverage: int) -> tuple:
         """
-        Resolve the actual quantity and leverage for an order, implementing
-        the dynamic margin logic:
+        Resolve the actual quantity and leverage for an order:
 
-          1. Use target_leverage unless Binance caps it lower (leverageBracket)
-          2. Compute notional = margin * actual_leverage
-          3. Compute qty = notional / price
-          4. If qty > LOT_SIZE maxQty: cap qty, keep margin, back-calc leverage
-          5. Return (qty, actual_leverage) — caller must set_leverage(actual_leverage)
+          1. Get max notional Binance allows for target_leverage on this symbol
+          2. Cap notional = min(margin × target_leverage, max_notional)
+          3. qty = floor(notional / price / stepSize) × stepSize
+          4. If qty > LOT_SIZE maxQty: cap qty, keep margin fixed, back-calc leverage
+          5. Return (qty, actual_leverage) — caller sets leverage if it changed
 
-        This ensures $200/$167 margin is always fully deployed.
+        This always deploys the full margin. Leverage only decreases if qty is capped.
         """
-        prec = self.get(symbol)
-        step = prec['qty_step']
+        prec     = self.get(symbol)
+        step     = prec['qty_step']
         decimals = prec['qty_decimals']
-        max_qty = prec['max_qty']
+        max_qty  = prec['max_qty']
 
-        # Step 1: respect Binance's max leverage for this symbol
+        # Step 1: get the notional cap Binance enforces at this leverage
         max_notional = self._client.get_max_notional(symbol, target_leverage)
 
-        # Find actual max leverage allowed: what leverage makes notional = max_notional?
-        # actual_lev = max_notional / margin  (capped at target)
-        bracket_max_lev = int(max_notional / margin) if margin > 0 else target_leverage
-        actual_leverage = min(target_leverage, bracket_max_lev)
-        actual_leverage = max(actual_leverage, 1)  # floor at 1x
+        # Step 2: cap notional — apply 1% safety buffer to avoid hitting boundary exactly
+        # Binance enforces notionalCap as a strict upper bound on demo accounts
+        safe_notional = max_notional * 0.99
+        notional = min(margin * target_leverage, safe_notional)
 
-        # Step 2: compute notional and raw qty
-        notional = margin * actual_leverage
-        raw_qty  = notional / price
+        # Step 3: compute qty floored to stepSize
+        raw_qty = notional / price
+        qty     = math.floor(raw_qty / step) * step
+        qty     = round(qty, decimals)
 
-        # Step 3: floor to stepSize
-        qty = math.floor(raw_qty / step) * step
-        qty = round(qty, decimals)
+        # Leverage stays at target unless qty is further capped below
+        actual_leverage = target_leverage
 
         # Step 4: if qty still exceeds LOT_SIZE maxQty, cap it and back-calc leverage
         if qty > max_qty:
-            qty = math.floor(max_qty / step) * step
-            qty = round(qty, decimals)
-            # Back-calculate leverage from capped qty, keeping margin fixed
+            qty             = math.floor(max_qty / step) * step
+            qty             = round(qty, decimals)
             capped_notional = qty * price
             actual_leverage = max(1, round(capped_notional / margin))
             log.warning(f"[QTY CAP] {symbol}: qty capped to {qty} (maxQty={max_qty}), "
                         f"leverage back-calc to {actual_leverage}x "
                         f"(notional=${capped_notional:.0f}, margin=${margin})")
 
-        log.debug(f"[RESOLVE] {symbol}: target={target_leverage}x → actual={actual_leverage}x | "
-                  f"margin=${margin} notional=${qty*price:.0f} qty={qty}")
+        log.debug(f"[RESOLVE] {symbol}: target={target_leverage}x "
+                  f"max_notional=${max_notional:.0f} "
+                  f"notional=${qty*price:.0f} qty={qty} lev={actual_leverage}x")
 
         return qty, actual_leverage
 
@@ -633,24 +638,28 @@ class OrderManager:
                 return
 
             self.client.set_margin_type(symbol, 'ISOLATED')
-            self.client.set_leverage(symbol, leverage)  # initial set to target
+
+            # Set leverage — response contains the actual leverage Binance accepted
+            lev_response    = self.client.set_leverage(symbol, leverage)
+            accepted_lev    = int(lev_response.get('leverage', leverage)) if lev_response else leverage
 
             current_price = self.client.get_ticker_price(symbol)
             prec          = self.precision.get(symbol)
 
-            # Resolve qty and actual leverage using dynamic margin logic:
-            # - Caps leverage to bracket maximum for this symbol
-            # - Caps qty to LOT_SIZE maxQty
-            # - Back-calculates leverage if qty is capped, keeping full margin deployed
+            # Resolve qty and actual leverage using dynamic margin logic.
+            # Use accepted_lev (what Binance confirmed) as the effective target.
             qty, actual_leverage = self.precision.resolve_order_params(
-                symbol, current_price, margin, leverage
+                symbol, current_price, margin, accepted_lev
             )
 
-            # If actual leverage differs from target, re-set it on Binance
-            if actual_leverage != leverage:
-                log.info(f"[LEVERAGE] {symbol}: {leverage}x → {actual_leverage}x "
-                         f"(constrained by bracket/maxQty, margin ${margin} preserved)")
+            # If qty cap further reduced leverage, re-set on Binance
+            if actual_leverage != accepted_lev:
+                log.info(f"[LEVERAGE] {symbol}: {accepted_lev}x → {actual_leverage}x "
+                         f"(maxQty cap, margin ${margin} preserved)")
                 self.client.set_leverage(symbol, actual_leverage)
+            elif accepted_lev != leverage:
+                log.info(f"[LEVERAGE] {symbol}: target {leverage}x → accepted {accepted_lev}x "
+                         f"(Binance limit)")
 
             if qty < prec['min_qty']:
                 log.warning(f"[SKIP] {symbol}: qty {qty} < min_qty {prec['min_qty']}")
