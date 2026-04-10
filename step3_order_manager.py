@@ -51,8 +51,10 @@ if TESTNET:
 
 # Strategy-specific trade sizing  (sized for 5,000 USDT wallet)
 STRATEGY_CONFIG = {
-    'S1': {'margin_usdt': 200.0,  'leverage': 50},   # EMA Cross   — target 50x, dynamic resolution caps if needed
-    'S2': {'margin_usdt': 166.5,  'leverage': 15},   # MA44 Bounce — target 15x, dynamic resolution caps if needed
+    'S1':            {'margin_usdt': 200.0,  'leverage': 50},
+    'S1_EMA_CROSS':  {'margin_usdt': 200.0,  'leverage': 50},
+    'S2':            {'margin_usdt': 166.5,  'leverage': 15},
+    'S2_MA44_BOUNCE':{'margin_usdt': 166.5,  'leverage': 15},
 }
 DEFAULT_MARGIN   = 200.0
 DEFAULT_LEVERAGE = 50
@@ -248,7 +250,8 @@ class BinanceClient:
                 best = brackets[-1]  # lowest leverage bracket
             return float(best.get('notionalCap', 10000))
         except Exception as e:
-            log.warning(f"leverageBracket fetch failed for {symbol}: {e}")
+            log.warning(f"leverageBracket fetch failed for {symbol} at {leverage}x: {e} — "
+                        f"using conservative fallback $5,000")
             return 5000.0
 
     def get_ticker_price(self, symbol: str) -> float:
@@ -618,7 +621,7 @@ class OrderManager:
             if symbol in self._pending_symbols:
                 log.info(f"[SKIP] {symbol}: entry already in progress")
                 return
-            if strategy == 'S2' and self._consec_losses.get('S2', 0) >= 2:
+            if strategy.startswith('S2') and self._consec_losses.get('S2', 0) >= 2:
                 log.info(f"[SKIP] S2 paused after {self._consec_losses['S2']} consecutive losses")
                 return
             self._pending_symbols.add(symbol)
