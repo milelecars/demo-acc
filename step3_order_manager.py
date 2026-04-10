@@ -441,15 +441,19 @@ class PrecisionCache:
         # Step 1: get the notional cap Binance enforces at this leverage
         max_notional = self._client.get_max_notional(symbol, target_leverage)
 
-        # Step 2: cap notional — apply 1% safety buffer to avoid hitting boundary exactly
-        # Binance enforces notionalCap as a strict upper bound on demo accounts
-        safe_notional = max_notional * 0.99
-        notional = min(margin * target_leverage, safe_notional)
+        # Step 2: compute raw notional (full margin × leverage)
+        notional = min(margin * target_leverage, max_notional)
 
         # Step 3: compute qty floored to stepSize
         raw_qty = notional / price
         qty     = math.floor(raw_qty / step) * step
         qty     = round(qty, decimals)
+
+        # Step 3b: if qty × price == max_notional exactly (boundary collision),
+        # subtract one stepSize to stay strictly below the cap.
+        # This preserves max margin deployment while avoiding -2027.
+        if abs(qty * price - max_notional) < 0.001 and qty >= step:
+            qty = round(qty - step, decimals)
 
         # Leverage stays at target unless qty is further capped below
         actual_leverage = target_leverage
