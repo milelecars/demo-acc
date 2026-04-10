@@ -593,9 +593,11 @@ function renderOpenPositions() {
       const dir  = pos.direction === 'LONG'
         ? '<span class="tag tag-long">LONG</span>'
         : '<span class="tag tag-short">SHORT</span>';
-      const stag = pos.strategy === 'S1'
+      const stag = pos.strategy?.startsWith('S1')
         ? '<span class="tag tag-s1">S1</span>'
-        : '<span class="tag tag-s2">S2</span>';
+        : pos.strategy?.startsWith('S2')
+        ? '<span class="tag tag-s2">S2</span>'
+        : '<span class="tag tag-s1">S1</span>';
 
       return `
         <div class="pos-card">
@@ -938,8 +940,8 @@ function renderTrades(trades) {
       ? `<div style="color:var(--muted);font-size:11px;margin-top:2px">${fmtTs(t.closeTime)}</div>`
       : `<div style="color:var(--muted);font-size:11px;margin-top:2px">—</div>`;
 
-    const stag   = t.strategy === 'S1' ? '<span class="tag tag-s1">S1</span>'
-                 : t.strategy === 'S2' ? '<span class="tag tag-s2">S2</span>'
+    const stag   = t.strategy?.startsWith('S1') ? '<span class="tag tag-s1">S1</span>'
+                 : t.strategy?.startsWith('S2') ? '<span class="tag tag-s2">S2</span>'
                  : '<span style="color:var(--muted);font-size:11px">—</span>';
     const side   = t.direction === 'LONG'
       ? '<span class="tag tag-long">LONG</span>'

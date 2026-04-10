@@ -99,6 +99,45 @@ class SupabaseClient:
         except Exception as e:
             log.warning(f"Supabase insert error: {e}")
 
+    def update(self, table: str, row_id: int, row: dict):
+        if not self._ok:
+            return
+        try:
+            headers = dict(self._headers)
+            headers['Prefer'] = 'return=minimal'
+            resp = requests.patch(
+                f"{self._url}/rest/v1/{table}?id=eq.{row_id}",
+                json=row,
+                headers=headers,
+                timeout=10,
+            )
+            if resp.status_code not in (200, 201, 204):
+                log.warning(f"Supabase update failed {resp.status_code}: {resp.text[:200]}")
+        except Exception as e:
+            log.warning(f"Supabase update error: {e}")
+
+    def insert_returning_id(self, table: str, row: dict) -> int | None:
+        """Insert a row and return its auto-generated id."""
+        if not self._ok:
+            return None
+        try:
+            headers = dict(self._headers)
+            headers['Prefer'] = 'return=representation'
+            resp = requests.post(
+                f"{self._url}/rest/v1/{table}",
+                json=row,
+                headers=headers,
+                timeout=10,
+            )
+            if resp.status_code in (200, 201):
+                data = resp.json()
+                if data:
+                    return data[0].get('id')
+            log.warning(f"Supabase insert_returning_id failed {resp.status_code}: {resp.text[:200]}")
+        except Exception as e:
+            log.warning(f"Supabase insert_returning_id error: {e}")
+        return None
+
     def select_all(self, table: str) -> list:
         if not self._ok:
             return []
@@ -383,6 +422,13 @@ class PrecisionCache:
         self._fetched_at = {}      # symbol -> epoch float
         self._lock   = threading.Lock()
 
+    def refresh(self, symbol: str) -> None:
+        """Force-expire cache for a symbol so next get() fetches fresh data from API."""
+        with self._lock:
+            self._fetched_at.pop(symbol, None)
+            self._cache.pop(symbol, None)
+        log.info(f"[CACHE] Refreshed precision cache for {symbol}")
+
     def get(self, symbol: str) -> dict:
         now = time.time()
         with self._lock:
@@ -512,6 +558,7 @@ class OpenPosition:
         self.signal_price   = signal_price   # intended entry from signal (for slippage calc)
         self.open_time      = datetime.now(tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
         self.open_ts        = int(time.time() * 1000)
+        self.db_id          = None           # set after Supabase insert in _log_trade_open
 
 
 # ============================================================================
@@ -675,7 +722,10 @@ class OrderManager:
                 return
 
             entry_side = 'BUY' if direction == 'LONG' else 'SELL'
-            lev_note = f" (target {leverage}x)" if actual_leverage != leverage else ""
+            exit_side  = 'SELL' if direction == 'LONG' else 'BUY'
+            sl_pct     = signal.sl_price / signal.entry_price
+            tp_pct     = signal.tp_price / signal.entry_price
+            lev_note   = f" (target {leverage}x)" if actual_leverage != leverage else ""
             log.info(f"[ORDER] Placing {entry_side} MARKET {qty} {symbol} @ ~{current_price:.6f} "
                      f"[{strategy} margin=${margin} lev={actual_leverage}x{lev_note}]")
 
@@ -688,13 +738,8 @@ class OrderManager:
             log.info(f"[ORDER] Entry filled: {entry_side} {qty} {symbol} @ {actual_entry:.6f} "
                      f"(order #{entry_order_id})")
 
-            sl_pct = signal.sl_price / signal.entry_price
-            tp_pct = signal.tp_price / signal.entry_price
-
             sl_price = self.precision.round_price(symbol, actual_entry * sl_pct)
             tp_price = self.precision.round_price(symbol, actual_entry * tp_pct)
-
-            exit_side = 'SELL' if direction == 'LONG' else 'BUY'
 
             # Uses /v1/algoOrder (mandatory since Binance API change 2025-12-09)
             # If TP/SL placement fails after entry fills, close immediately and log to DB
@@ -780,12 +825,54 @@ class OrderManager:
             body = e.response.text if e.response is not None else ''
             if '-2019' in body:
                 log.warning(f"[SKIP] {symbol}: insufficient margin in demo account — skipping trade")
+                with self._lock:
+                    self._pending_symbols.discard(symbol)
             elif '-4005' in body:
-                log.warning(f"[SKIP] {symbol}: quantity exceeds symbol max — skipping trade")
+                # qty > maxQty — precision cache was stale. Refresh and retry once.
+                log.warning(f"[RETRY] {symbol}: qty exceeded maxQty (-4005), refreshing cache and retrying")
+                self.precision.refresh(symbol)
+                try:
+                    prec         = self.precision.get(symbol)
+                    retry_qty, retry_lev = self.precision.resolve_order_params(
+                        symbol, current_price, margin, actual_leverage
+                    )
+                    if retry_qty < prec['min_qty']:
+                        log.warning(f"[SKIP] {symbol}: retry qty {retry_qty} below min — skipping")
+                        with self._lock:
+                            self._pending_symbols.discard(symbol)
+                        return
+                    if retry_lev != actual_leverage:
+                        self.client.set_leverage(symbol, retry_lev)
+                    retry_result = self.client.place_market_order(symbol, entry_side, retry_qty)
+                    log.info(f"[ORDER] Retry filled: {entry_side} {retry_qty} {symbol} "
+                             f"@ {float(retry_result.get('avgPrice', current_price)):.6f}")
+                    # Re-place TP/SL with corrected qty
+                    retry_entry  = float(retry_result.get('avgPrice', 0) or 0) or current_price
+                    retry_sl     = self.precision.round_price(symbol, retry_entry * sl_pct)
+                    retry_tp     = self.precision.round_price(symbol, retry_entry * tp_pct)
+                    tp_r = self.client.place_take_profit_order(symbol, exit_side, retry_qty, retry_tp)
+                    sl_r = self.client.place_stop_loss_order(symbol, exit_side, retry_qty, retry_sl)
+                    position = OpenPosition(
+                        symbol=symbol, strategy=strategy, direction=direction,
+                        entry_price=retry_entry, sl_price=retry_sl, tp_price=retry_tp,
+                        quantity=retry_qty, margin_usdt=margin, leverage=retry_lev,
+                        tp_order_id=tp_r.get('algoId'), sl_order_id=sl_r.get('algoId'),
+                        entry_order_id=retry_result['orderId'],
+                        signal_ts=signal.signal_ts, signal_time=signal.signal_time,
+                        signal_price=signal.entry_price,
+                    )
+                    with self._lock:
+                        self._open_positions[symbol] = position
+                        self._pending_symbols.discard(symbol)
+                    self._log_trade_open(position)
+                except Exception as retry_err:
+                    log.error(f"[ORDER] Retry failed for {symbol}: {retry_err}")
+                    with self._lock:
+                        self._pending_symbols.discard(symbol)
             else:
                 log.error(f"[ORDER] Failed to place trade for {symbol}: {e}", exc_info=True)
-            with self._lock:
-                self._pending_symbols.discard(symbol)
+                with self._lock:
+                    self._pending_symbols.discard(symbol)
 
         except Exception as e:
             log.error(f"[ORDER] Failed to place trade for {symbol}: {e}", exc_info=True)
@@ -879,6 +966,38 @@ class OrderManager:
                  f"entry={pos.entry_price:.6f} SL={pos.sl_price:.6f} TP={pos.tp_price:.6f} "
                  f"qty={pos.quantity} margin=${pos.margin_usdt} lev={pos.leverage}x")
 
+        signal_price = pos.signal_price if pos.signal_price else pos.entry_price
+        slippage_pct = round((pos.entry_price - signal_price) / signal_price * 100, 4) \
+                       if signal_price else 0.0
+
+        row = {
+            'open_time':    pos.open_time,
+            'close_time':   None,
+            'symbol':       pos.symbol,
+            'strategy':     pos.strategy,
+            'direction':    pos.direction,
+            'signal_price': round(signal_price, 8),
+            'entry_price':  round(pos.entry_price, 8),
+            'sl_price':     round(pos.sl_price, 8),
+            'tp_price':     round(pos.tp_price, 8),
+            'quantity':     pos.quantity,
+            'margin_usdt':  pos.margin_usdt,
+            'leverage':     pos.leverage,
+            'outcome':      'OPEN',
+            'pnl_pct':      None,
+            'pnl_usdt':     None,
+            'fee_usdt':     None,
+            'slippage_pct': slippage_pct,
+            'signal_time':  pos.signal_time,
+        }
+
+        db_id = self.supabase.insert_returning_id('trades', row)
+        pos.db_id = db_id
+        if db_id:
+            log.info(f"[LOG] Supabase row #{db_id} created (OPEN) for {pos.symbol}")
+        else:
+            log.warning(f"[LOG] Supabase insert_returning_id returned None for {pos.symbol} — close will fallback to insert")
+
     def _log_trade_close(self, pos: OpenPosition, outcome: str, exit_price: float = None):
         close_time = datetime.now(tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
 
@@ -936,7 +1055,22 @@ class OrderManager:
             'signal_time':  pos.signal_time,
         }
 
-        self.supabase.insert('trades', row)
+        if pos.db_id:
+            # Update the existing OPEN row to final outcome
+            self.supabase.update('trades', pos.db_id, {
+                'close_time':   close_time,
+                'sl_price':     round(pos.sl_price, 8),
+                'tp_price':     round(pos.tp_price, 8),
+                'outcome':      outcome,
+                'pnl_pct':      round(pnl_pct, 3),
+                'pnl_usdt':     round(pnl_usdt, 2),
+                'fee_usdt':     fee_usdt,
+                'slippage_pct': slippage_pct,
+            })
+            log.info(f"[LOG] Supabase row #{pos.db_id} updated → {outcome}")
+        else:
+            # Fallback: full INSERT (position was opened before this deploy)
+            self.supabase.insert('trades', row)
         self.closed_positions.append(row)
 
         with open(TRADE_LOG_FILE, 'a', newline='', encoding='utf-8') as f:
