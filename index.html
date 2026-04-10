@@ -694,10 +694,8 @@ async function loadTrades() {
     console.warn('Could not load /proxy/trades:', e.message);
   }
 
-  // If bot trades endpoint empty, fall back to Futures allOrders pairing
-  if (!trades.length) {
-    trades = await loadTradesFromFutures();
-  }
+  // Binance allOrders fallback disabled — Supabase is the sole source of truth.
+  // Only closed trades are logged; raw Binance order pairing produces incomplete data.
 
   allTrades = trades.sort((a, b) => b.openTime - a.openTime);
   updateStats();
