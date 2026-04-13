@@ -512,7 +512,10 @@ class PrecisionCache:
             qty             = math.floor(max_qty / step) * step
             qty             = round(qty, decimals)
             capped_notional = qty * price
-            actual_leverage = max(1, round(capped_notional / margin))
+            raw_lev         = capped_notional / margin
+            # Round DOWN to nearest valid Binance leverage level to avoid -4028
+            valid_levels    = [50, 40, 33, 25, 20, 15, 10, 5, 3, 1]
+            actual_leverage = next((l for l in valid_levels if l <= raw_lev), 1)
             log.warning(f"[QTY CAP] {symbol}: qty capped to {qty} (maxQty={max_qty}), "
                         f"leverage back-calc to {actual_leverage}x "
                         f"(notional=${capped_notional:.0f}, margin=${margin})")
@@ -710,7 +713,13 @@ class OrderManager:
             if actual_leverage != accepted_lev:
                 log.info(f"[LEVERAGE] {symbol}: {accepted_lev}x → {actual_leverage}x "
                          f"(maxQty cap, margin ${margin} preserved)")
-                self.client.set_leverage(symbol, actual_leverage)
+                lev_resp2       = self.client.set_leverage(symbol, actual_leverage)
+                confirmed_lev   = int(lev_resp2.get('leverage', actual_leverage)) if lev_resp2 else actual_leverage
+                if confirmed_lev != actual_leverage:
+                    # Binance accepted a different leverage (e.g. step-down hit) — re-resolve qty
+                    log.info(f"[LEVERAGE] {symbol}: back-calc {actual_leverage}x → confirmed {confirmed_lev}x, re-resolving qty")
+                    actual_leverage = confirmed_lev
+                    qty, _ = self.precision.resolve_order_params(symbol, current_price, margin, actual_leverage)
             elif accepted_lev != leverage:
                 log.info(f"[LEVERAGE] {symbol}: target {leverage}x → accepted {accepted_lev}x "
                          f"(Binance limit)")
