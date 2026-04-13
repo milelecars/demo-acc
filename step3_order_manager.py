@@ -59,7 +59,8 @@ STRATEGY_CONFIG = {
 DEFAULT_MARGIN   = 200.0
 DEFAULT_LEVERAGE = 50
 
-MAX_OPEN_POSITIONS = 10
+MAX_OPEN_POSITIONS = 30   # practical max: $5,000 balance / $166.5 min margin = ~30 positions
+                          # pre-flight balance check is the real hard limit
 POLL_INTERVAL      = 15
 TRADE_LOG_FILE     = 'trade_log.csv'
 
