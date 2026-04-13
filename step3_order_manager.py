@@ -200,6 +200,13 @@ class BinanceClient:
     def _post(self, path: str, params: dict):
         params = self._sign(params)
         resp = self.session.post(f"{self.base_url}{path}", data=params, timeout=10)
+        # Retry once on Binance demo server timeout (-1007 / 408)
+        if resp.status_code == 408:
+            log.warning(f"POST {path} timed out (408), retrying once...")
+            time.sleep(1)
+            params = self._sign({k:v for k,v in params.items()
+                                  if k not in ('timestamp','signature')})
+            resp = self.session.post(f"{self.base_url}{path}", data=params, timeout=15)
         if resp.status_code != 200:
             log.error(f"POST {path} failed {resp.status_code}: {resp.text}")
         resp.raise_for_status()
@@ -694,6 +701,25 @@ class OrderManager:
                 with self._lock:
                     self._pending_symbols.discard(symbol)
                 return
+
+            # Cancel any stale open orders on this symbol before changing margin type
+            # Prevents -4067: "Position side cannot be changed if there exists open orders"
+            try:
+                open_orders = self.client.get_open_orders(symbol)
+                for o in (open_orders or []):
+                    try:
+                        self.client.cancel_order(symbol, o['orderId'])
+                    except Exception:
+                        pass
+                # Also cancel any open algo orders
+                open_algos = self.client._get('/v1/openAlgoOrders', {'symbol': symbol}, signed=True)
+                for o in (open_algos or []):
+                    try:
+                        self.client.cancel_algo_order(o['algoId'])
+                    except Exception:
+                        pass
+            except Exception as e:
+                log.debug(f"[CLEANUP] {symbol}: stale order cleanup: {e}")
 
             self.client.set_margin_type(symbol, 'ISOLATED')
 
