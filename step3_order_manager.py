@@ -976,7 +976,63 @@ class OrderManager:
                     self.detector.on_trade_closed(pos.symbol, pos.strategy, outcome)
 
             except Exception as e:
-                log.warning(f"Could not check position {pos.symbol}: {e}")
+                log.warning(f"Could not check algo orders for {pos.symbol}: {e} — checking position risk")
+                # Fallback: check if Binance still has an open position
+                # If not, the trade closed externally (algo order expired/filled without us noticing)
+                try:
+                    pos_risk = self.client.get_position(pos.symbol)
+                    pos_amt  = float(pos_risk.get('positionAmt', 0))
+                    if pos_amt == 0:
+                        # Position is gone on Binance — find actual exit from userTrades
+                        log.warning(f"[RECONCILE] {pos.symbol}: no open position on Binance, "
+                                    f"position closed externally — fetching exit price from trades")
+                        try:
+                            trades = self.client._get('/v1/userTrades',
+                                                      {'symbol': pos.symbol, 'limit': 10},
+                                                      signed=True)
+                            # Find the closing trade (opposite side to entry)
+                            close_side = 'SELL' if pos.direction == 'LONG' else 'BUY'
+                            close_trades = [t for t in trades
+                                           if t.get('side') == close_side
+                                           and int(t.get('time', 0)) > pos.open_ts]
+                            if close_trades:
+                                # Use the most recent closing trade price
+                                last = max(close_trades, key=lambda t: t['time'])
+                                actual_exit = float(last['price'])
+                                realized    = sum(float(t.get('realizedPnl', 0)) for t in close_trades)
+                            else:
+                                actual_exit = pos.sl_price  # conservative fallback
+                                realized    = None
+
+                            # Determine outcome from exit price
+                            if pos.direction == 'LONG':
+                                outcome = 'WIN' if actual_exit >= pos.tp_price else 'LOSS'
+                            else:
+                                outcome = 'WIN' if actual_exit <= pos.tp_price else 'LOSS'
+
+                            log.warning(f"[RECONCILE] {pos.symbol}: exit={actual_exit:.6f} "
+                                        f"outcome={outcome} realizedPnl={realized}")
+
+                            self._log_trade_close(pos, outcome, exit_price=actual_exit)
+
+                            with self._lock:
+                                self._open_positions.pop(pos.symbol, None)
+                                strat = pos.strategy
+                                if outcome == 'WIN':
+                                    self._consec_losses[strat] = 0
+                                else:
+                                    self._consec_losses[strat] = self._consec_losses.get(strat, 0) + 1
+
+                            if self.detector:
+                                self.detector.on_trade_closed(pos.symbol, pos.strategy, outcome)
+
+                        except Exception as rec_err:
+                            log.error(f"[RECONCILE] {pos.symbol}: failed to fetch exit trades: {rec_err}")
+                    else:
+                        log.warning(f"[RECONCILE] {pos.symbol}: position still open on Binance "
+                                    f"(amt={pos_amt}) — algo order query failed but position alive")
+                except Exception as risk_err:
+                    log.error(f"Could not reconcile position {pos.symbol}: {risk_err}")
 
     # ── Logging ───────────────────────────────────────────────────────────────
 
