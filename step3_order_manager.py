@@ -5,8 +5,8 @@ Changes in this version:
   - Switched from Binance Spot to Binance USDT-M Futures (testnet & live)
   - Isolated margin mode per trade
   - Strategy-specific sizing:
-      S1 (EMA Cross)    → $200 margin at 20x leverage
-      S2 (MA44 Bounce)  → $166.5 margin at 15x leverage
+      S1 (EMA Cross)    → $20 margin × 50x leverage ($1,000 notional)
+      S2 (MA44 Bounce)  → $16.65 margin × 15x leverage ($249.75 notional)
   - Global cap: max 10 open positions at once (new signals ignored above limit)
   - Consecutive-loss counters per strategy exposed for dashboard
   - pnl_usdt stored alongside pnl_pct in trade log
@@ -58,40 +58,23 @@ if TESTNET:
 # ============================================================================
 
 POSITION_CAPS = {
-    'BTCUSDT':11389,    'ETHUSDT':11389,    'BCHUSDT':11389,    'TRXUSDT':11311,
-    'LINKUSDT':11045,   'LTCUSDT':11045,    'ZECUSDT':11045,    'DOTUSDT':11045,
-    'FILUSDT':11045,    'TRUMPUSDT':9271,   'QNTUSDT':9271,
-    'STXUSDT':8562,     'IMXUSDT':8562,     'INJUSDT':8562,     'JASMYUSDT':8562,
-    'ENSUSDT':7143,     '1000LUNCUSDT':6433,
-    'BNBUSDT':5724,     'XRPUSDT':5724,     'XMRUSDT':5724,     'XLMUSDT':5724,
-    'NEARUSDT':5724,    '1000PEPEUSDT':5724,'SKYUSDT':5724,     'ETCUSDT':5724,
-    'PENGUUSDT':5724,   'VIRTUALUSDT':5724, 'XTZUSDT':5724,     'SYRUPUSDT':5724,
-    'BARDUSDT':5724,    'HYPEUSDT':5724,
-    'DOGEUSDT':2886,    'AVAXUSDT':2886,    'HBARUSDT':2886,    'SUIUSDT':2886,
-    '1000SHIBUSDT':2886,'TONUSDT':2886,     'UNIUSDT':2886,     'AAVEUSDT':2886,
-    'ASTERUSDT':2886,   'ONDOUSDT':2886,    'WLDUSDT':2886,     'ENAUSDT':2886,
-    'RENDERUSDT':2886,  'ATOMUSDT':2886,    'ALGOUSDT':2886,    'APTUSDT':2886,
-    'ZROUSDT':2886,     'VETUSDT':2886,     'ARBUSDT':2886,     'CAKEUSDT':2886,
-    'FETUSDT':2886,     'SEIUSDT':2886,     'DASHUSDT':2886,    'ETHFIUSDT':2886,
-    'CHZUSDT':2886,     'CRVUSDT':2886,     'TIAUSDT':2886,     '1000FLOKIUSDT':2886,
-    'PYTHUSDT':2886,    'GRTUSDT':2886,     'IOTAUSDT':2886,    'OPUSDT':2886,
-    'LDOUSDT':2886,     'SANDUSDT':2886,    'TWTUSDT':2886,     'RUNEUSDT':2886,
-    'ADAUSDT':2886,
-    'TAOUSDT':2176,     'JUPUSDT':1600,     'STRKUSDT':946,     '1000BONKUSDT':557,
-    'KASUSDT':302,
-    'SOLUSDT':48,       'POLUSDT':48,       # below margin — will skip
+    'BTCUSDT':11389,   'ETHUSDT':11389,   'XRPUSDT':5724,
+    'TRXUSDT':11311,   'ADAUSDT':2886,    'ZECUSDT':11045,
+    'DOTUSDT':11045,   'VETUSDT':2886,    'FETUSDT':2886,
+    'SEIUSDT':2886,    'DASHUSDT':2886,   'SYRUPUSDT':5724,
+    'ENSUSDT':7143,    'BARDUSDT':5724,   'TWTUSDT':2886,
 }
 
 STRATEGY_CONFIG = {
-    'S1':            {'margin_usdt': 200.0,  'leverage': 50},
-    'S1_EMA_CROSS':  {'margin_usdt': 200.0,  'leverage': 50},
-    'S2':            {'margin_usdt': 166.5,  'leverage': 15},
-    'S2_MA44_BOUNCE':{'margin_usdt': 166.5,  'leverage': 15},
+    'S1':            {'margin_usdt': 20.0,   'leverage': 50},   # EMA Cross   — $1,000 notional target
+    'S1_EMA_CROSS':  {'margin_usdt': 20.0,   'leverage': 50},
+    'S2':            {'margin_usdt': 16.65,  'leverage': 15},   # MA44 Bounce — $249.75 notional target
+    'S2_MA44_BOUNCE':{'margin_usdt': 16.65,  'leverage': 15},
 }
-DEFAULT_MARGIN   = 200.0
+DEFAULT_MARGIN   = 20.0
 DEFAULT_LEVERAGE = 50
 
-MAX_OPEN_POSITIONS = 30   # practical max: $5,000 balance / $166.5 min margin = ~30 positions
+MAX_OPEN_POSITIONS = 30   # practical max: $5,000 balance / $16.65 min margin = ~300 positions; cap at 30 concurrent
                           # pre-flight balance check is the real hard limit
 POLL_INTERVAL      = 15
 TRADE_LOG_FILE     = 'trade_log.csv'
