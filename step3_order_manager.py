@@ -50,6 +50,38 @@ if TESTNET:
     BASE_URL = "https://demo-fapi.binance.com/fapi"
 
 # Strategy-specific trade sizing  (sized for 5,000 USDT wallet)
+# ============================================================================
+# POSITION CAPS — real -2027 notional limits per symbol on demo-fapi
+# Discovered empirically via find_caps.py (binary search with real orders).
+# These are the actual Binance demo account caps at 50x leverage, with 5% margin.
+# Regenerate when switching to live account (live limits are much higher).
+# ============================================================================
+
+POSITION_CAPS = {
+    'BTCUSDT':11389,    'ETHUSDT':11389,    'BCHUSDT':11389,    'TRXUSDT':11311,
+    'LINKUSDT':11045,   'LTCUSDT':11045,    'ZECUSDT':11045,    'DOTUSDT':11045,
+    'FILUSDT':11045,    'TRUMPUSDT':9271,   'QNTUSDT':9271,
+    'STXUSDT':8562,     'IMXUSDT':8562,     'INJUSDT':8562,     'JASMYUSDT':8562,
+    'ENSUSDT':7143,     '1000LUNCUSDT':6433,
+    'BNBUSDT':5724,     'XRPUSDT':5724,     'XMRUSDT':5724,     'XLMUSDT':5724,
+    'NEARUSDT':5724,    '1000PEPEUSDT':5724,'SKYUSDT':5724,     'ETCUSDT':5724,
+    'PENGUUSDT':5724,   'VIRTUALUSDT':5724, 'XTZUSDT':5724,     'SYRUPUSDT':5724,
+    'BARDUSDT':5724,    'HYPEUSDT':5724,
+    'DOGEUSDT':2886,    'AVAXUSDT':2886,    'HBARUSDT':2886,    'SUIUSDT':2886,
+    '1000SHIBUSDT':2886,'TONUSDT':2886,     'UNIUSDT':2886,     'AAVEUSDT':2886,
+    'ASTERUSDT':2886,   'ONDOUSDT':2886,    'WLDUSDT':2886,     'ENAUSDT':2886,
+    'RENDERUSDT':2886,  'ATOMUSDT':2886,    'ALGOUSDT':2886,    'APTUSDT':2886,
+    'ZROUSDT':2886,     'VETUSDT':2886,     'ARBUSDT':2886,     'CAKEUSDT':2886,
+    'FETUSDT':2886,     'SEIUSDT':2886,     'DASHUSDT':2886,    'ETHFIUSDT':2886,
+    'CHZUSDT':2886,     'CRVUSDT':2886,     'TIAUSDT':2886,     '1000FLOKIUSDT':2886,
+    'PYTHUSDT':2886,    'GRTUSDT':2886,     'IOTAUSDT':2886,    'OPUSDT':2886,
+    'LDOUSDT':2886,     'SANDUSDT':2886,    'TWTUSDT':2886,     'RUNEUSDT':2886,
+    'ADAUSDT':2886,
+    'TAOUSDT':2176,     'JUPUSDT':1600,     'STRKUSDT':946,     '1000BONKUSDT':557,
+    'KASUSDT':302,
+    'SOLUSDT':48,       'POLUSDT':48,       # below margin — will skip
+}
+
 STRATEGY_CONFIG = {
     'S1':            {'margin_usdt': 200.0,  'leverage': 50},
     'S1_EMA_CROSS':  {'margin_usdt': 200.0,  'leverage': 50},
@@ -269,45 +301,17 @@ class BinanceClient:
 
     def get_max_notional(self, symbol: str, leverage: int) -> float:
         """
-        Returns the maximum notional position size allowed for a symbol
-        at the given leverage, using /v1/leverageBracket.
-        Fixes -2027: Exceeded maximum allowable position at current leverage.
-        Falls back to 5,000 if the endpoint fails (conservative demo limit).
+        Returns the real -2027 notional cap for a symbol.
+        Uses empirically discovered POSITION_CAPS dict instead of leverageBracket,
+        which returns incorrect values on the demo account.
+        Falls back to $2,886 (conservative demo default) if symbol not in dict.
         """
-        try:
-            # leverageBracket is a signed USER_DATA endpoint — requires API key + signature
-            data = self._get('/v1/leverageBracket', {'symbol': symbol}, signed=True)
-            # Response is a list of {symbol, brackets:[{bracket, initialLeverage, notionalCap,...}]}
-            brackets = None
-            if isinstance(data, list):
-                for item in data:
-                    if item.get('symbol') == symbol:
-                        brackets = item.get('brackets', [])
-                        break
-            elif isinstance(data, dict):
-                brackets = data.get('brackets', [])
-            if not brackets:
-                log.warning(f"leverageBracket returned no brackets for {symbol} at {leverage}x — "
-                            f"using fallback $5,000. Raw response: {str(data)[:200]}")
-                return 5000.0
-            # Find the tightest bracket that still allows the requested leverage.
-            # A bracket allows the leverage if: leverage <= bracket.initialLeverage
-            # Among all matching brackets, take the one with the LOWEST notionalCap
-            # (most conservative) — this is the bracket Binance will apply.
-            matching = [b for b in brackets if leverage <= b.get('initialLeverage', 0)]
-            if not matching:
-                # Leverage exceeds all brackets — use the lowest-leverage bracket
-                best = min(brackets, key=lambda b: b.get('initialLeverage', 0))
-            else:
-                best = min(matching, key=lambda b: b.get('notionalCap', float('inf')))
-            cap = float(best.get('notionalCap', 5000))
-            log.info(f"[BRACKET] {symbol} at {leverage}x → notionalCap=${cap:,.0f} "
-                     f"(bracket initialLeverage={best.get('initialLeverage')})")
-            return cap
-        except Exception as e:
-            log.warning(f"leverageBracket fetch failed for {symbol} at {leverage}x: {e} — "
-                        f"using conservative fallback $5,000")
-            return 5000.0
+        cap = POSITION_CAPS.get(symbol)
+        if cap is not None:
+            log.debug(f"[CAP] {symbol}: notionalCap=${cap:,} (from POSITION_CAPS)")
+            return float(cap)
+        log.warning(f"[CAP] {symbol}: not in POSITION_CAPS, using fallback $2,886")
+        return 2886.0
 
     def get_ticker_price(self, symbol: str) -> float:
         data = self._get('/v1/ticker/price', {'symbol': symbol})
@@ -710,6 +714,15 @@ class OrderManager:
                     self._pending_symbols.discard(symbol)
                 return
 
+            # Pre-flight cap check — skip symbols whose demo cap is below margin
+            symbol_cap = POSITION_CAPS.get(symbol, 2886.0)
+            if symbol_cap < margin:
+                log.warning(f"[SKIP] {symbol}: demo position cap ${symbol_cap:.0f} "
+                            f"< margin ${margin:.0f} — not tradeable on demo")
+                with self._lock:
+                    self._pending_symbols.discard(symbol)
+                return
+
             # Cancel any stale open orders on this symbol before changing margin type
             # Prevents -4067: "Position side cannot be changed if there exists open orders"
             try:
@@ -914,38 +927,46 @@ class OrderManager:
                     with self._lock:
                         self._pending_symbols.discard(symbol)
             elif '-2027' in body:
-                # Exceeded max allowable position — leverageBracket cap was wrong/stale.
-                # Step down notional by trying progressively lower leverage levels until accepted.
+                # Exceeded max allowable position.
+                # The leverageBracket cap is unreliable on demo — it may return the same
+                # cap regardless of leverage, causing infinite retries at the same notional.
+                # Instead: keep the original leverage and halve the notional on each attempt.
+                # This is guaranteed to converge and preserves leverage (only qty shrinks).
                 log.warning(f"[RETRY] {symbol}: -2027 at lev={actual_leverage}x "
-                            f"qty={qty} notional=${qty*current_price:.0f} — stepping down notional")
-                valid_levels = [l for l in [50,40,33,25,20,15,10,5,3,1] if l < actual_leverage]
-                placed = False
-                for fallback_lev in valid_levels:
+                            f"qty={qty} notional=${qty*current_price:.0f} — halving notional")
+                placed       = False
+                retry_qty    = qty
+                prec         = self.precision.get(symbol)
+                MIN_VIABLE_NOTIONAL = margin * 0.5  # skip if notional < 50% of margin (not worth trading)
+                for attempt in range(6):   # max 6 halvings: $5000→$2500→$1250→$625→$312→$156
+                    retry_qty = math.floor(retry_qty / 2 / prec['qty_step']) * prec['qty_step']
+                    retry_qty = round(retry_qty, prec['qty_decimals'])
+                    if retry_qty < prec['min_qty']:
+                        log.warning(f"[SKIP] {symbol}: halved qty {retry_qty} below min — giving up")
+                        break
+                    notional_check = retry_qty * current_price
+                    if notional_check < MIN_VIABLE_NOTIONAL:
+                        log.warning(f"[SKIP] {symbol}: halved notional ${notional_check:.0f} < "
+                                    f"min viable ${MIN_VIABLE_NOTIONAL:.0f} — demo cap too tight, skipping")
+                        break
+                    log.info(f"[RETRY] {symbol}: attempt {attempt+1} — "
+                             f"qty={retry_qty} notional=${notional_check:.0f} lev={actual_leverage}x")
                     try:
-                        # Set the lower leverage
-                        lev_r = self.client.set_leverage(symbol, fallback_lev)
-                        confirmed = int(lev_r.get('leverage', fallback_lev)) if lev_r else fallback_lev
-                        # Recompute qty at lower leverage, keeping full margin
-                        retry_qty, retry_lev = self.precision.resolve_order_params(
-                            symbol, current_price, margin, confirmed
-                        )
-                        if retry_lev != confirmed:
-                            self.client.set_leverage(symbol, retry_lev)
-                        prec = self.precision.get(symbol)
-                        if retry_qty < prec['min_qty']:
-                            continue
-                        log.info(f"[RETRY] {symbol}: retrying at {retry_lev}x "
-                                 f"qty={retry_qty} notional=${retry_qty*current_price:.0f}")
                         retry_result = self.client.place_market_order(symbol, entry_side, retry_qty)
                         retry_entry  = float(retry_result.get('avgPrice', 0) or 0) or current_price
                         retry_sl     = self.precision.round_price(symbol, retry_entry * sl_pct)
                         retry_tp     = self.precision.round_price(symbol, retry_entry * tp_pct)
                         tp_r = self.client.place_take_profit_order(symbol, exit_side, retry_qty, retry_tp)
                         sl_r = self.client.place_stop_loss_order(symbol, exit_side, retry_qty, retry_sl)
+                        # Back-calc actual leverage from accepted notional
+                        accepted_notional = retry_qty * retry_entry
+                        back_lev = max(1, round(accepted_notional / margin))
+                        valid    = [50,40,33,25,20,15,10,5,3,1]
+                        back_lev = next((l for l in valid if l <= back_lev), 1)
                         position = OpenPosition(
                             symbol=symbol, strategy=strategy, direction=direction,
                             entry_price=retry_entry, sl_price=retry_sl, tp_price=retry_tp,
-                            quantity=retry_qty, margin_usdt=margin, leverage=retry_lev,
+                            quantity=retry_qty, margin_usdt=margin, leverage=back_lev,
                             tp_order_id=tp_r.get('algoId'), sl_order_id=sl_r.get('algoId'),
                             entry_order_id=retry_result['orderId'],
                             signal_ts=signal.signal_ts, signal_time=signal.signal_time,
@@ -955,22 +976,22 @@ class OrderManager:
                             self._open_positions[symbol] = position
                             self._pending_symbols.discard(symbol)
                         self._log_trade_open(position)
-                        log.info(f"[RETRY] {symbol}: successfully placed at {retry_lev}x "
-                                 f"after -2027 at {actual_leverage}x")
+                        log.info(f"[RETRY] {symbol}: placed at attempt {attempt+1} — "
+                                 f"qty={retry_qty} notional=${accepted_notional:.0f} lev={back_lev}x")
                         placed = True
                         break
                     except requests.exceptions.HTTPError as retry_err:
                         retry_body = retry_err.response.text if retry_err.response else ''
-                        if '-2027' in retry_body or '-4028' in retry_body:
-                            log.warning(f"[RETRY] {symbol}: {fallback_lev}x also rejected, trying lower...")
+                        if '-2027' in retry_body:
+                            log.warning(f"[RETRY] {symbol}: attempt {attempt+1} still -2027, halving again...")
                             continue
-                        log.error(f"[RETRY] {symbol}: unexpected error at {fallback_lev}x: {retry_err}")
+                        log.error(f"[RETRY] {symbol}: attempt {attempt+1} unexpected error: {retry_err}")
                         break
                     except Exception as retry_err:
-                        log.error(f"[RETRY] {symbol}: retry failed at {fallback_lev}x: {retry_err}")
+                        log.error(f"[RETRY] {symbol}: attempt {attempt+1} failed: {retry_err}")
                         break
                 if not placed:
-                    log.warning(f"[SKIP] {symbol}: could not place order after -2027 exhausted all levels")
+                    log.warning(f"[SKIP] {symbol}: -2027 could not be resolved after halving")
                     with self._lock:
                         self._pending_symbols.discard(symbol)
             else:
