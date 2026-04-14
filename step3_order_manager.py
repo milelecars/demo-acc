@@ -287,15 +287,23 @@ class BinanceClient:
             elif isinstance(data, dict):
                 brackets = data.get('brackets', [])
             if not brackets:
+                log.warning(f"leverageBracket returned no brackets for {symbol} at {leverage}x — "
+                            f"using fallback $5,000. Raw response: {str(data)[:200]}")
                 return 5000.0
-            # Find the bracket where leverage <= initialLeverage (highest leverage that fits)
-            best = None
-            for b in brackets:
-                if leverage <= b.get('initialLeverage', 0):
-                    best = b
-            if best is None:
-                best = brackets[-1]  # lowest leverage bracket
-            return float(best.get('notionalCap', 10000))
+            # Find the tightest bracket that still allows the requested leverage.
+            # A bracket allows the leverage if: leverage <= bracket.initialLeverage
+            # Among all matching brackets, take the one with the LOWEST notionalCap
+            # (most conservative) — this is the bracket Binance will apply.
+            matching = [b for b in brackets if leverage <= b.get('initialLeverage', 0)]
+            if not matching:
+                # Leverage exceeds all brackets — use the lowest-leverage bracket
+                best = min(brackets, key=lambda b: b.get('initialLeverage', 0))
+            else:
+                best = min(matching, key=lambda b: b.get('notionalCap', float('inf')))
+            cap = float(best.get('notionalCap', 5000))
+            log.info(f"[BRACKET] {symbol} at {leverage}x → notionalCap=${cap:,.0f} "
+                     f"(bracket initialLeverage={best.get('initialLeverage')})")
+            return cap
         except Exception as e:
             log.warning(f"leverageBracket fetch failed for {symbol} at {leverage}x: {e} — "
                         f"using conservative fallback $5,000")
@@ -903,6 +911,66 @@ class OrderManager:
                     self._log_trade_open(position)
                 except Exception as retry_err:
                     log.error(f"[ORDER] Retry failed for {symbol}: {retry_err}")
+                    with self._lock:
+                        self._pending_symbols.discard(symbol)
+            elif '-2027' in body:
+                # Exceeded max allowable position — leverageBracket cap was wrong/stale.
+                # Step down notional by trying progressively lower leverage levels until accepted.
+                log.warning(f"[RETRY] {symbol}: -2027 at lev={actual_leverage}x "
+                            f"qty={qty} notional=${qty*current_price:.0f} — stepping down notional")
+                valid_levels = [l for l in [50,40,33,25,20,15,10,5,3,1] if l < actual_leverage]
+                placed = False
+                for fallback_lev in valid_levels:
+                    try:
+                        # Set the lower leverage
+                        lev_r = self.client.set_leverage(symbol, fallback_lev)
+                        confirmed = int(lev_r.get('leverage', fallback_lev)) if lev_r else fallback_lev
+                        # Recompute qty at lower leverage, keeping full margin
+                        retry_qty, retry_lev = self.precision.resolve_order_params(
+                            symbol, current_price, margin, confirmed
+                        )
+                        if retry_lev != confirmed:
+                            self.client.set_leverage(symbol, retry_lev)
+                        prec = self.precision.get(symbol)
+                        if retry_qty < prec['min_qty']:
+                            continue
+                        log.info(f"[RETRY] {symbol}: retrying at {retry_lev}x "
+                                 f"qty={retry_qty} notional=${retry_qty*current_price:.0f}")
+                        retry_result = self.client.place_market_order(symbol, entry_side, retry_qty)
+                        retry_entry  = float(retry_result.get('avgPrice', 0) or 0) or current_price
+                        retry_sl     = self.precision.round_price(symbol, retry_entry * sl_pct)
+                        retry_tp     = self.precision.round_price(symbol, retry_entry * tp_pct)
+                        tp_r = self.client.place_take_profit_order(symbol, exit_side, retry_qty, retry_tp)
+                        sl_r = self.client.place_stop_loss_order(symbol, exit_side, retry_qty, retry_sl)
+                        position = OpenPosition(
+                            symbol=symbol, strategy=strategy, direction=direction,
+                            entry_price=retry_entry, sl_price=retry_sl, tp_price=retry_tp,
+                            quantity=retry_qty, margin_usdt=margin, leverage=retry_lev,
+                            tp_order_id=tp_r.get('algoId'), sl_order_id=sl_r.get('algoId'),
+                            entry_order_id=retry_result['orderId'],
+                            signal_ts=signal.signal_ts, signal_time=signal.signal_time,
+                            signal_price=signal.entry_price,
+                        )
+                        with self._lock:
+                            self._open_positions[symbol] = position
+                            self._pending_symbols.discard(symbol)
+                        self._log_trade_open(position)
+                        log.info(f"[RETRY] {symbol}: successfully placed at {retry_lev}x "
+                                 f"after -2027 at {actual_leverage}x")
+                        placed = True
+                        break
+                    except requests.exceptions.HTTPError as retry_err:
+                        retry_body = retry_err.response.text if retry_err.response else ''
+                        if '-2027' in retry_body or '-4028' in retry_body:
+                            log.warning(f"[RETRY] {symbol}: {fallback_lev}x also rejected, trying lower...")
+                            continue
+                        log.error(f"[RETRY] {symbol}: unexpected error at {fallback_lev}x: {retry_err}")
+                        break
+                    except Exception as retry_err:
+                        log.error(f"[RETRY] {symbol}: retry failed at {fallback_lev}x: {retry_err}")
+                        break
+                if not placed:
+                    log.warning(f"[SKIP] {symbol}: could not place order after -2027 exhausted all levels")
                     with self._lock:
                         self._pending_symbols.discard(symbol)
             else:
