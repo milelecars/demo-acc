@@ -65,6 +65,12 @@ POSITION_CAPS = {
     'ENSUSDT':7143,    'BARDUSDT':5724,   'TWTUSDT':2886,
 }
 
+# Max leverage allowed per symbol on demo-fapi (empirically discovered via -4028 errors).
+# If a symbol is not listed here, the standard step-down sequence handles it at runtime.
+MAX_LEVERAGE = {
+    'TRXUSDT': 25,   # demo limit — 50x/40x/33x all rejected
+}
+
 STRATEGY_CONFIG = {
     'S1':            {'margin_usdt': 20.0,   'leverage': 50},   # EMA Cross   — $1,000 notional target
     'S1_EMA_CROSS':  {'margin_usdt': 20.0,   'leverage': 50},
@@ -726,6 +732,12 @@ class OrderManager:
                 log.debug(f"[CLEANUP] {symbol}: stale order cleanup: {e}")
 
             self.client.set_margin_type(symbol, 'ISOLATED')
+
+            # Apply known max leverage for this symbol (avoids wasted -4028 step-down calls)
+            max_lev = MAX_LEVERAGE.get(symbol, leverage)
+            if max_lev < leverage:
+                log.info(f"[LEVERAGE] {symbol}: capping target {leverage}x → {max_lev}x (MAX_LEVERAGE)")
+                leverage = max_lev
 
             # Set leverage — response contains the actual leverage Binance accepted
             lev_response    = self.client.set_leverage(symbol, leverage)
