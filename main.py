@@ -179,8 +179,8 @@ def main():
     manager._log_trade_open = _patched_open
 
     _orig_close = manager._log_trade_close
-    def _patched_close(pos, outcome, exit_price=None):
-        _orig_close(pos, outcome, exit_price=exit_price)
+    def _patched_close(pos, outcome, exit_price=None, close_time=None):
+        _orig_close(pos, outcome, exit_price=exit_price, close_time=close_time)
         if alerts:
             alert_exit = exit_price or (pos.tp_price if outcome == 'WIN' else pos.sl_price)
             alerts.on_trade_closed(pos.symbol, pos.strategy, pos.direction,
