@@ -1403,6 +1403,8 @@ class OrderManager:
         else:
             log.info(f"[STARTUP] All {len(self._open_positions)} restored "
                      f"position(s) confirmed open on Binance")
+
+    def _log_trade_open(self, pos: OpenPosition):
         log.info(f"[LOG] Trade opened: {pos.symbol} {pos.strategy} {pos.direction} "
                  f"entry={pos.entry_price:.6f} SL={pos.sl_price:.6f} TP={pos.tp_price:.6f} "
                  f"qty={pos.quantity} margin=${pos.margin_usdt} lev={pos.leverage}x")
