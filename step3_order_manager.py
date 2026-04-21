@@ -346,20 +346,19 @@ class BinanceClient:
                                 quantity: float, tp_price: float) -> dict:
         """
         TAKE_PROFIT via POST /fapi/v1/algoOrder.
-        Mandatory since Binance migrated conditional orders to Algo Service 2025-12-09.
-        Params per official docs: algoType + type (mandatory), triggerPrice, price, workingType.
+        Uses closePosition=true — closes the ENTIRE position on trigger regardless
+        of size. Safer than quantity-based: survives any position size changes.
         """
         params = {
-            'symbol':       symbol,
-            'side':         side,
-            'algoType':     'CONDITIONAL',
-            'type':         'TAKE_PROFIT',     # mandatory per docs (not orderType)
-            'quantity':     self._fmt_price(quantity),
-            'price':        self._fmt_price(tp_price),
-            'triggerPrice': self._fmt_price(tp_price),
-            'timeInForce':  'GTC',
-            'reduceOnly':   'true',
-            'workingType':  'CONTRACT_PRICE',
+            'symbol':        symbol,
+            'side':          side,
+            'algoType':      'CONDITIONAL',
+            'type':          'TAKE_PROFIT',
+            'closePosition': 'true',           # close full position, ignore qty
+            'price':         self._fmt_price(tp_price),
+            'triggerPrice':  self._fmt_price(tp_price),
+            'timeInForce':   'GTC',
+            'workingType':   'CONTRACT_PRICE',
         }
         return self._post_algo('/v1/algoOrder', params)
 
@@ -367,19 +366,19 @@ class BinanceClient:
                               quantity: float, sl_price: float) -> dict:
         """
         STOP via POST /fapi/v1/algoOrder.
-        Mandatory since Binance migrated conditional orders to Algo Service 2025-12-09.
+        Uses closePosition=true — closes the ENTIRE position on trigger regardless
+        of size. Safer than quantity-based: survives any position size changes.
         """
         params = {
-            'symbol':       symbol,
-            'side':         side,
-            'algoType':     'CONDITIONAL',
-            'type':         'STOP',            # mandatory per docs (not orderType)
-            'quantity':     self._fmt_price(quantity),
-            'price':        self._fmt_price(sl_price),
-            'triggerPrice': self._fmt_price(sl_price),
-            'timeInForce':  'GTC',
-            'reduceOnly':   'true',
-            'workingType':  'CONTRACT_PRICE',
+            'symbol':        symbol,
+            'side':          side,
+            'algoType':      'CONDITIONAL',
+            'type':          'STOP',
+            'closePosition': 'true',           # close full position, ignore qty
+            'price':         self._fmt_price(sl_price),
+            'triggerPrice':  self._fmt_price(sl_price),
+            'timeInForce':   'GTC',
+            'workingType':   'CONTRACT_PRICE',
         }
         return self._post_algo('/v1/algoOrder', params)
 
@@ -603,6 +602,7 @@ class OrderManager:
         # In-memory history loaded from Supabase on startup
         self.closed_positions = []
         self._load_supabase_history()
+        self._reconcile_on_startup()   # Option B: cross-check DB OPEN rows vs live Binance
 
         self._monitor_thread = threading.Thread(
             target=self._monitor_loop, daemon=True, name='pos_monitor'
@@ -708,6 +708,27 @@ class OrderManager:
             if symbol_cap < margin:
                 log.warning(f"[SKIP] {symbol}: demo position cap ${symbol_cap:.0f} "
                             f"< margin ${margin:.0f} — not tradeable on demo")
+                with self._lock:
+                    self._pending_symbols.discard(symbol)
+                return
+
+            # Real-time Binance check — prevents stacking on existing positions
+            # after redeploy or if memory state is stale
+            try:
+                all_risk = self.client._get('/v2/positionRisk', {}, signed=True)
+                binance_amt = next(
+                    (float(p['positionAmt']) for p in (all_risk if isinstance(all_risk, list) else [])
+                     if p['symbol'] == symbol and float(p.get('positionAmt', 0)) != 0),
+                    0
+                )
+                if binance_amt != 0:
+                    log.warning(f"[SKIP] {symbol}: position already exists on Binance "
+                                f"(amt={binance_amt}) — will not stack")
+                    with self._lock:
+                        self._pending_symbols.discard(symbol)
+                    return
+            except Exception as e:
+                log.warning(f"[SKIP] {symbol}: could not verify Binance position: {e}")
                 with self._lock:
                     self._pending_symbols.discard(symbol)
                 return
@@ -1049,8 +1070,9 @@ class OrderManager:
                 if pos_amt == 0:
                     # ── Position is GONE on Binance ───────────────────────────
                     # Try to find actual exit price from: algo orders → userTrades → SL fallback
-                    actual_exit = None
-                    outcome     = None
+                    actual_exit  = None
+                    outcome      = None
+                    close_method = 'unknown'
 
                     # Check algo orders first (may still have result if recently closed)
                     try:
@@ -1059,9 +1081,10 @@ class OrderManager:
                         tp_filled = tp_order.get('algoStatus') == 'FINISHED'
                         sl_filled = sl_order.get('algoStatus') == 'FINISHED'
                         if tp_filled or sl_filled:
-                            filled   = tp_order if tp_filled else sl_order
-                            outcome  = 'WIN' if tp_filled else 'LOSS'
-                            actual_exit = float(filled.get('actualPrice') or 0) or None
+                            filled       = tp_order if tp_filled else sl_order
+                            outcome      = 'WIN' if tp_filled else 'LOSS'
+                            actual_exit  = float(filled.get('actualPrice') or 0) or None
+                            close_method = 'TP_ORDER' if tp_filled else 'SL_ORDER'
                             # Cancel the remaining order
                             try:
                                 cancel_id = pos.sl_order_id if tp_filled else pos.tp_order_id
@@ -1086,12 +1109,33 @@ class OrderManager:
                             if close_trades:
                                 last        = max(close_trades, key=lambda t: t['time'])
                                 actual_exit = float(last['price'])
+                                realized    = sum(float(t.get('realizedPnl', 0)) for t in close_trades)
+                                # Determine how it closed based on exit vs SL/TP
+                                if pos.direction == 'LONG':
+                                    if abs(actual_exit - pos.tp_price) / pos.tp_price < 0.001:
+                                        close_method = 'TP_FILL'
+                                    elif abs(actual_exit - pos.sl_price) / pos.sl_price < 0.002:
+                                        close_method = 'SL_FILL'
+                                    elif actual_exit > pos.entry_price:
+                                        close_method = 'EXTERNAL_WIN'
+                                    else:
+                                        close_method = 'EXTERNAL_LOSS'
+                                else:
+                                    if abs(actual_exit - pos.tp_price) / pos.tp_price < 0.001:
+                                        close_method = 'TP_FILL'
+                                    elif abs(actual_exit - pos.sl_price) / pos.sl_price < 0.002:
+                                        close_method = 'SL_FILL'
+                                    elif actual_exit < pos.entry_price:
+                                        close_method = 'EXTERNAL_WIN'
+                                    else:
+                                        close_method = 'EXTERNAL_LOSS'
                         except Exception:
                             pass
 
                     # Determine outcome from exit price if not already known
                     if actual_exit is None:
-                        actual_exit = pos.sl_price   # last resort fallback
+                        actual_exit  = pos.sl_price
+                        close_method = 'FALLBACK_SL'
                         log.warning(f"[RECONCILE] {pos.symbol}: no exit data found — "
                                     f"using SL ${actual_exit:.6f} as fallback")
 
@@ -1102,8 +1146,9 @@ class OrderManager:
                             outcome = 'WIN' if actual_exit <= pos.tp_price else 'LOSS'
 
                     log.info(f"[CLOSED] {pos.symbol} {pos.strategy} {pos.direction} | "
-                             f"outcome={outcome} | entry={pos.entry_price:.6f} "
-                             f"exit={actual_exit:.6f} SL={pos.sl_price:.6f} TP={pos.tp_price:.6f}")
+                             f"outcome={outcome} | close_method={close_method} | "
+                             f"entry={pos.entry_price:.6f} exit={actual_exit:.6f} "
+                             f"SL={pos.sl_price:.6f} TP={pos.tp_price:.6f}")
 
                     self._log_trade_close(pos, outcome, exit_price=actual_exit)
 
@@ -1217,7 +1262,138 @@ class OrderManager:
         log.info(f"Loaded {total} historical trades from Supabase "
                  f"({open_count} open positions restored to monitor)")
 
-    def _log_trade_open(self, pos: OpenPosition):
+    def _reconcile_on_startup(self):
+        """
+        Option B — Startup reconciliation.
+
+        After loading OPEN rows from Supabase, cross-check each one against
+        live Binance positionRisk. If Binance says the position is already
+        gone, find the actual close details from userTrades and update the
+        DB row immediately — before the monitor loop even starts.
+
+        This ensures that positions closed during a previous deployment
+        (while the bot was down) are correctly recorded with real exit data.
+        """
+        if not self._open_positions:
+            return
+
+        log.info(f"[STARTUP] Reconciling {len(self._open_positions)} restored "
+                 f"open position(s) against Binance...")
+
+        # Fetch all live positions in one call
+        try:
+            all_risk = self.client._get('/v2/positionRisk', {}, signed=True)
+            binance_open = {
+                p['symbol']: float(p['positionAmt'])
+                for p in (all_risk if isinstance(all_risk, list) else [])
+                if float(p.get('positionAmt', 0)) != 0
+            }
+        except Exception as e:
+            log.warning(f"[STARTUP] positionRisk fetch failed: {e} — skipping reconciliation")
+            return
+
+        to_remove = []
+        for symbol, pos in list(self._open_positions.items()):
+            if symbol in binance_open:
+                log.info(f"[STARTUP] {symbol}: confirmed open on Binance "
+                         f"(amt={binance_open[symbol]}) — monitor will track")
+                continue
+
+            # Position is GONE on Binance — find real close data
+            log.warning(f"[STARTUP] {symbol}: NOT open on Binance — "
+                        f"closed externally, fetching close details")
+
+            actual_exit = None
+            outcome     = None
+
+            # 1. Try userTrades with startTime filter
+            try:
+                trades = self.client._get('/v1/userTrades', {
+                    'symbol':    symbol,
+                    'startTime': pos.open_ts,
+                    'limit':     50,
+                }, signed=True)
+                close_side   = 'BUY' if pos.direction == 'LONG' else 'SELL'
+                close_trades = [
+                    t for t in (trades if isinstance(trades, list) else [])
+                    if t.get('side') == close_side
+                    and int(t.get('time', 0)) > pos.open_ts
+                ]
+                if close_trades:
+                    last        = max(close_trades, key=lambda t: int(t['time']))
+                    actual_exit = float(last['price'])
+                    realized    = sum(float(t.get('realizedPnl', 0)) for t in close_trades)
+                    close_ts_ms = int(last['time'])
+                    close_time  = datetime.fromtimestamp(
+                        close_ts_ms / 1000, tz=timezone.utc
+                    ).strftime('%Y-%m-%d %H:%M UTC')
+                    log.info(f"[STARTUP] {symbol}: found close trade — "
+                             f"exit={actual_exit} realized=${realized:.4f} at {close_time}")
+            except Exception as e:
+                log.warning(f"[STARTUP] {symbol}: userTrades fetch failed: {e}")
+
+            # 2. Fallback to SL price if no trade found
+            if actual_exit is None:
+                actual_exit = pos.sl_price
+                close_time  = datetime.now(tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+                log.warning(f"[STARTUP] {symbol}: no trade history found — "
+                            f"using SL ${actual_exit:.6f} as fallback exit")
+
+            # 3. Determine outcome
+            if pos.direction == 'LONG':
+                outcome = 'WIN' if actual_exit >= pos.tp_price else 'LOSS'
+            else:
+                outcome = 'WIN' if actual_exit <= pos.tp_price else 'LOSS'
+
+            # 4. Calculate P&L from actual exit
+            notional = pos.margin_usdt * pos.leverage
+            if pos.direction == 'LONG':
+                pnl_pct = (actual_exit - pos.entry_price) / pos.entry_price * 100
+            else:
+                pnl_pct = (pos.entry_price - actual_exit) / pos.entry_price * 100
+            pnl_usdt     = round(notional * pnl_pct / 100, 2)
+            entry_fee    = 0.0005
+            exit_fee     = 0.0002 if outcome == 'WIN' else 0.0005
+            fee_usdt     = round(notional * (entry_fee + exit_fee), 4)
+
+            log.info(f"[STARTUP] {symbol}: outcome={outcome} "
+                     f"exit={actual_exit:.6f} pnl={pnl_pct:+.3f}% "
+                     f"${pnl_usdt:+.2f} fee=${fee_usdt}")
+
+            # 5. Update DB row with real close data
+            if pos.db_id:
+                self.supabase.update('trades', pos.db_id, {
+                    'close_time':   close_time,
+                    'outcome':      outcome,
+                    'pnl_pct':      round(pnl_pct, 3),
+                    'pnl_usdt':     pnl_usdt,
+                    'fee_usdt':     fee_usdt,
+                })
+                log.info(f"[STARTUP] Supabase row #{pos.db_id} updated → {outcome}")
+            else:
+                log.warning(f"[STARTUP] {symbol}: no db_id — cannot update DB row")
+
+            # 6. Update consecutive loss counter
+            strat_key = 'S2' if pos.strategy.startswith('S2') else 'S1'
+            if outcome == 'WIN':
+                self._consec_losses[strat_key] = 0
+            else:
+                self._consec_losses[strat_key] = \
+                    self._consec_losses.get(strat_key, 0) + 1
+
+            to_remove.append(symbol)
+
+        # Remove reconciled positions from memory
+        with self._lock:
+            for symbol in to_remove:
+                self._open_positions.pop(symbol, None)
+
+        if to_remove:
+            log.info(f"[STARTUP] Reconciled {len(to_remove)} position(s): "
+                     f"{', '.join(to_remove)}")
+        else:
+            log.info(f"[STARTUP] All {len(self._open_positions)} restored "
+                     f"position(s) confirmed open on Binance")
         log.info(f"[LOG] Trade opened: {pos.symbol} {pos.strategy} {pos.direction} "
                  f"entry={pos.entry_price:.6f} SL={pos.sl_price:.6f} TP={pos.tp_price:.6f} "
                  f"qty={pos.quantity} margin=${pos.margin_usdt} lev={pos.leverage}x")
