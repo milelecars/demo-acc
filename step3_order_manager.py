@@ -1011,112 +1011,156 @@ class OrderManager:
                 log.error(f"Monitor error: {e}", exc_info=True)
 
     def _check_positions(self):
+        """
+        Position monitor — Binance positionRisk is the PRIMARY source of truth.
+
+        Every cycle:
+          1. Fetch all open positions from Binance positionRisk
+          2. For each position we think is open in memory:
+             a. If Binance says it's GONE → position closed externally
+                → find exit price from userTrades or algo order
+                → update DB, release gate
+             b. If Binance says it's STILL OPEN → check algo orders
+                for TP/SL fill → close normally if filled
+        """
         with self._lock:
             positions = list(self._open_positions.values())
 
+        if not positions:
+            return
+
+        # ── Step 1: fetch all real open positions from Binance ────────────────
+        try:
+            all_pos_risk = self.client._get('/v2/positionRisk', {}, signed=True)
+            binance_open = {
+                p['symbol']: float(p['positionAmt'])
+                for p in (all_pos_risk if isinstance(all_pos_risk, list) else [])
+                if float(p.get('positionAmt', 0)) != 0
+            }
+        except Exception as e:
+            log.warning(f"[MONITOR] positionRisk fetch failed: {e} — skipping cycle")
+            return
+
+        # ── Step 2: check each in-memory position ─────────────────────────────
         for pos in positions:
             try:
-                # Algo orders use GET /v1/algoOrder (algoId)
-                # algoStatus values: NEW → TRIGGERING → TRIGGERED → FINISHED (executed) or CANCELED/EXPIRED
-                tp_order  = self.client.get_algo_order(pos.tp_order_id)
-                sl_order  = self.client.get_algo_order(pos.sl_order_id)
-                tp_filled = tp_order.get('algoStatus') == 'FINISHED'
-                sl_filled = sl_order.get('algoStatus') == 'FINISHED'
+                pos_amt = binance_open.get(pos.symbol, 0)
 
-                if not tp_filled and not sl_filled:
-                    continue
+                if pos_amt == 0:
+                    # ── Position is GONE on Binance ───────────────────────────
+                    # Try to find actual exit price from: algo orders → userTrades → SL fallback
+                    actual_exit = None
+                    outcome     = None
 
-                outcome = 'WIN' if tp_filled else 'LOSS'
+                    # Check algo orders first (may still have result if recently closed)
+                    try:
+                        tp_order = self.client.get_algo_order(pos.tp_order_id)
+                        sl_order = self.client.get_algo_order(pos.sl_order_id)
+                        tp_filled = tp_order.get('algoStatus') == 'FINISHED'
+                        sl_filled = sl_order.get('algoStatus') == 'FINISHED'
+                        if tp_filled or sl_filled:
+                            filled   = tp_order if tp_filled else sl_order
+                            outcome  = 'WIN' if tp_filled else 'LOSS'
+                            actual_exit = float(filled.get('actualPrice') or 0) or None
+                            # Cancel the remaining order
+                            try:
+                                cancel_id = pos.sl_order_id if tp_filled else pos.tp_order_id
+                                self.client.cancel_algo_order(cancel_id)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass  # algo order gone — fall through to userTrades
 
-                # actualPrice = actual fill price from matching engine (per docs)
-                filled_order = tp_order if tp_filled else sl_order
-                actual_exit  = float(filled_order.get('actualPrice') or 0)
-                if actual_exit == 0:
-                    actual_exit = pos.tp_price if tp_filled else pos.sl_price
-
-                try:
-                    if tp_filled:
-                        self.client.cancel_algo_order(pos.sl_order_id)
-                    else:
-                        self.client.cancel_algo_order(pos.tp_order_id)
-                except Exception as ce:
-                    log.warning(f"Could not cancel remaining order for {pos.symbol}: {ce}")
-
-                log.info(f"[CLOSED] {pos.symbol} {pos.strategy} {pos.direction} | "
-                         f"outcome={outcome} | entry={pos.entry_price:.6f} "
-                         f"exit={actual_exit:.6f} SL={pos.sl_price:.6f} TP={pos.tp_price:.6f}")
-
-                self._log_trade_close(pos, outcome, exit_price=actual_exit)
-
-                with self._lock:
-                    self._open_positions.pop(pos.symbol, None)
-                    strat = pos.strategy
-                    if outcome == 'WIN':
-                        self._consec_losses[strat] = 0
-                    else:
-                        self._consec_losses[strat] = self._consec_losses.get(strat, 0) + 1
-
-                if self.detector:
-                    self.detector.on_trade_closed(pos.symbol, pos.strategy, outcome)
-
-            except Exception as e:
-                log.warning(f"Could not check algo orders for {pos.symbol}: {e} — checking position risk")
-                # Fallback: check if Binance still has an open position
-                # If not, the trade closed externally (algo order expired/filled without us noticing)
-                try:
-                    pos_risk = self.client.get_position(pos.symbol)
-                    pos_amt  = float(pos_risk.get('positionAmt', 0))
-                    if pos_amt == 0:
-                        # Position is gone on Binance — find actual exit from userTrades
-                        log.warning(f"[RECONCILE] {pos.symbol}: no open position on Binance, "
-                                    f"position closed externally — fetching exit price from trades")
+                    # If algo orders didn't give us the exit, check userTrades
+                    if actual_exit is None:
                         try:
                             trades = self.client._get('/v1/userTrades',
-                                                      {'symbol': pos.symbol, 'limit': 10},
+                                                      {'symbol': pos.symbol,
+                                                       'startTime': pos.open_ts,
+                                                       'limit': 20},
                                                       signed=True)
-                            # Find the closing trade (opposite side to entry)
-                            close_side = 'SELL' if pos.direction == 'LONG' else 'BUY'
-                            close_trades = [t for t in trades
-                                           if t.get('side') == close_side
-                                           and int(t.get('time', 0)) > pos.open_ts]
+                            close_side  = 'SELL' if pos.direction == 'LONG' else 'BUY'
+                            close_trades = [t for t in (trades if isinstance(trades, list) else [])
+                                            if t.get('side') == close_side
+                                            and int(t.get('time', 0)) > pos.open_ts]
                             if close_trades:
-                                # Use the most recent closing trade price
-                                last = max(close_trades, key=lambda t: t['time'])
+                                last        = max(close_trades, key=lambda t: t['time'])
                                 actual_exit = float(last['price'])
-                                realized    = sum(float(t.get('realizedPnl', 0)) for t in close_trades)
-                            else:
-                                actual_exit = pos.sl_price  # conservative fallback
-                                realized    = None
+                        except Exception:
+                            pass
 
-                            # Determine outcome from exit price
-                            if pos.direction == 'LONG':
-                                outcome = 'WIN' if actual_exit >= pos.tp_price else 'LOSS'
-                            else:
-                                outcome = 'WIN' if actual_exit <= pos.tp_price else 'LOSS'
+                    # Determine outcome from exit price if not already known
+                    if actual_exit is None:
+                        actual_exit = pos.sl_price   # last resort fallback
+                        log.warning(f"[RECONCILE] {pos.symbol}: no exit data found — "
+                                    f"using SL ${actual_exit:.6f} as fallback")
 
-                            log.warning(f"[RECONCILE] {pos.symbol}: exit={actual_exit:.6f} "
-                                        f"outcome={outcome} realizedPnl={realized}")
+                    if outcome is None:
+                        if pos.direction == 'LONG':
+                            outcome = 'WIN' if actual_exit >= pos.tp_price else 'LOSS'
+                        else:
+                            outcome = 'WIN' if actual_exit <= pos.tp_price else 'LOSS'
+
+                    log.info(f"[CLOSED] {pos.symbol} {pos.strategy} {pos.direction} | "
+                             f"outcome={outcome} | entry={pos.entry_price:.6f} "
+                             f"exit={actual_exit:.6f} SL={pos.sl_price:.6f} TP={pos.tp_price:.6f}")
+
+                    self._log_trade_close(pos, outcome, exit_price=actual_exit)
+
+                    with self._lock:
+                        self._open_positions.pop(pos.symbol, None)
+                        if outcome == 'WIN':
+                            self._consec_losses[pos.strategy] = 0
+                        else:
+                            self._consec_losses[pos.strategy] = \
+                                self._consec_losses.get(pos.strategy, 0) + 1
+
+                    if self.detector:
+                        self.detector.on_trade_closed(pos.symbol, pos.strategy, outcome)
+
+                else:
+                    # ── Position still OPEN on Binance — check algo orders ─────
+                    try:
+                        tp_order  = self.client.get_algo_order(pos.tp_order_id)
+                        sl_order  = self.client.get_algo_order(pos.sl_order_id)
+                        tp_filled = tp_order.get('algoStatus') == 'FINISHED'
+                        sl_filled = sl_order.get('algoStatus') == 'FINISHED'
+
+                        if tp_filled or sl_filled:
+                            outcome  = 'WIN' if tp_filled else 'LOSS'
+                            filled   = tp_order if tp_filled else sl_order
+                            actual_exit = float(filled.get('actualPrice') or 0)
+                            if actual_exit == 0:
+                                actual_exit = pos.tp_price if tp_filled else pos.sl_price
+                            try:
+                                cancel_id = pos.sl_order_id if tp_filled else pos.tp_order_id
+                                self.client.cancel_algo_order(cancel_id)
+                            except Exception as ce:
+                                log.warning(f"Could not cancel remaining order for {pos.symbol}: {ce}")
+
+                            log.info(f"[CLOSED] {pos.symbol} {pos.strategy} {pos.direction} | "
+                                     f"outcome={outcome} | entry={pos.entry_price:.6f} "
+                                     f"exit={actual_exit:.6f} SL={pos.sl_price:.6f} TP={pos.tp_price:.6f}")
 
                             self._log_trade_close(pos, outcome, exit_price=actual_exit)
 
                             with self._lock:
                                 self._open_positions.pop(pos.symbol, None)
-                                strat = pos.strategy
                                 if outcome == 'WIN':
-                                    self._consec_losses[strat] = 0
+                                    self._consec_losses[pos.strategy] = 0
                                 else:
-                                    self._consec_losses[strat] = self._consec_losses.get(strat, 0) + 1
+                                    self._consec_losses[pos.strategy] = \
+                                        self._consec_losses.get(pos.strategy, 0) + 1
 
                             if self.detector:
                                 self.detector.on_trade_closed(pos.symbol, pos.strategy, outcome)
 
-                        except Exception as rec_err:
-                            log.error(f"[RECONCILE] {pos.symbol}: failed to fetch exit trades: {rec_err}")
-                    else:
-                        log.warning(f"[RECONCILE] {pos.symbol}: position still open on Binance "
-                                    f"(amt={pos_amt}) — algo order query failed but position alive")
-                except Exception as risk_err:
-                    log.error(f"Could not reconcile position {pos.symbol}: {risk_err}")
+                    except Exception as e:
+                        # Algo order query failed but position still open — not critical
+                        log.debug(f"[MONITOR] {pos.symbol}: algo order check failed: {e}")
+
+            except Exception as e:
+                log.error(f"[MONITOR] Error checking {pos.symbol}: {e}")
 
     # ── Logging ───────────────────────────────────────────────────────────────
 
@@ -1133,9 +1177,45 @@ class OrderManager:
 
     def _load_supabase_history(self):
         rows = self.supabase.select_all('trades')
-        self.closed_positions = rows
-        if rows:
-            log.info(f"Loaded {len(rows)} historical trades from Supabase")
+        self.closed_positions = [r for r in rows if r.get('outcome') != 'OPEN']
+
+        # Reconstruct open positions in memory from OPEN rows
+        # This ensures the position monitor tracks them after a redeploy
+        open_rows = [r for r in rows if r.get('outcome') == 'OPEN']
+        for row in open_rows:
+            sym = row.get('symbol')
+            if not sym or sym in self._open_positions:
+                continue
+            try:
+                pos = OpenPosition(
+                    symbol         = sym,
+                    strategy       = row.get('strategy', ''),
+                    direction      = row.get('direction', ''),
+                    entry_price    = float(row.get('entry_price', 0)),
+                    sl_price       = float(row.get('sl_price', 0)),
+                    tp_price       = float(row.get('tp_price', 0)),
+                    quantity       = float(row.get('quantity', 0)),
+                    margin_usdt    = float(row.get('margin_usdt', 0)),
+                    leverage       = int(row.get('leverage', 1)),
+                    tp_order_id    = 0,   # algo orders unknown after redeploy
+                    sl_order_id    = 0,   # position monitor will use positionRisk
+                    entry_order_id = 0,
+                    signal_ts      = 0,
+                    signal_time    = row.get('signal_time', ''),
+                    signal_price   = float(row.get('signal_price', 0) or 0),
+                )
+                pos.open_time = row.get('open_time', pos.open_time)
+                pos.db_id     = row.get('id')
+                self._open_positions[sym] = pos
+                log.info(f"[RESTORE] Loaded open position from DB: {sym} "
+                         f"{pos.direction} entry={pos.entry_price} db_id={pos.db_id}")
+            except Exception as e:
+                log.warning(f"[RESTORE] Failed to restore {sym} from DB: {e}")
+
+        total = len(rows)
+        open_count = len(open_rows)
+        log.info(f"Loaded {total} historical trades from Supabase "
+                 f"({open_count} open positions restored to monitor)")
 
     def _log_trade_open(self, pos: OpenPosition):
         log.info(f"[LOG] Trade opened: {pos.symbol} {pos.strategy} {pos.direction} "
