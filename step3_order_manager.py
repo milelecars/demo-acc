@@ -65,12 +65,6 @@ POSITION_CAPS = {
     'ENSUSDT':7143,    'BARDUSDT':5724,   'TWTUSDT':2886,
 }
 
-# Max leverage allowed per symbol on demo-fapi (empirically discovered via -4028 errors).
-# If a symbol is not listed here, the standard step-down sequence handles it at runtime.
-MAX_LEVERAGE = {
-    'TRXUSDT': 25,   # demo limit — 50x/40x/33x all rejected
-}
-
 STRATEGY_CONFIG = {
     'S1':            {'margin_usdt': 20.0,   'leverage': 50},   # EMA Cross   — $1,000 notional target
     'S1_EMA_CROSS':  {'margin_usdt': 20.0,   'leverage': 50},
@@ -754,13 +748,7 @@ class OrderManager:
 
             self.client.set_margin_type(symbol, 'ISOLATED')
 
-            # Apply known max leverage for this symbol (avoids wasted -4028 step-down calls)
-            max_lev = MAX_LEVERAGE.get(symbol, leverage)
-            if max_lev < leverage:
-                log.info(f"[LEVERAGE] {symbol}: capping target {leverage}x → {max_lev}x (MAX_LEVERAGE)")
-                leverage = max_lev
-
-            # Set leverage — response contains the actual leverage Binance accepted
+            # Set leverage — Binance step-down handles any symbol-specific limits at runtime
             lev_response    = self.client.set_leverage(symbol, leverage)
             accepted_lev    = int(lev_response.get('leverage', leverage)) if lev_response else leverage
 
@@ -831,7 +819,7 @@ class OrderManager:
                 log.error(f"[EMERGENCY] {symbol}: TP/SL placement failed after entry fill — "
                           f"closing position immediately. Error: {tp_sl_err}")
                 try:
-                    close_result = self.client.place_market_order(symbol, exit_side, qty)
+                    close_result = self.client.place_market_order(symbol, exit_side, qty, reduce_only=True)
                     exit_price   = float(close_result.get('avgPrice', 0) or actual_entry)
                     log.info(f"[EMERGENCY] {symbol}: position closed @ {exit_price:.6f}")
                 except Exception as close_err:
@@ -860,8 +848,8 @@ class OrderManager:
 
                 with self._lock:
                     self._pending_symbols.discard(symbol)
-                if detector:
-                    detector.on_trade_closed(symbol, strategy, 'LOSS')
+                if self.detector:
+                    self.detector.on_trade_closed(symbol, strategy, 'LOSS')
                 return
 
             position = OpenPosition(
@@ -1068,7 +1056,8 @@ class OrderManager:
                 pos_amt = binance_open.get(pos.symbol, 0)
 
                 if pos_amt == 0:
-                    # ── Position is GONE on Binance ───────────────────────────
+                    # ── initialise before try block ───────────────────────────
+                    actual_close_time = None   # will be set from trade timestamp if available
                     # Try to find actual exit price from: algo orders → userTrades → SL fallback
                     actual_exit  = None
                     outcome      = None
@@ -1100,7 +1089,7 @@ class OrderManager:
                             trades = self.client._get('/v1/userTrades',
                                                       {'symbol': pos.symbol,
                                                        'startTime': pos.open_ts,
-                                                       'limit': 20},
+                                                       'limit': 50},
                                                       signed=True)
                             close_side  = 'SELL' if pos.direction == 'LONG' else 'BUY'
                             close_trades = [t for t in (trades if isinstance(trades, list) else [])
@@ -1110,6 +1099,9 @@ class OrderManager:
                                 last        = max(close_trades, key=lambda t: t['time'])
                                 actual_exit = float(last['price'])
                                 realized    = sum(float(t.get('realizedPnl', 0)) for t in close_trades)
+                                actual_close_time = datetime.fromtimestamp(
+                                    int(last['time']) / 1000, tz=timezone.utc
+                                ).strftime('%Y-%m-%d %H:%M UTC')
                                 # Determine how it closed based on exit vs SL/TP
                                 if pos.direction == 'LONG':
                                     if abs(actual_exit - pos.tp_price) / pos.tp_price < 0.001:
@@ -1150,15 +1142,16 @@ class OrderManager:
                              f"entry={pos.entry_price:.6f} exit={actual_exit:.6f} "
                              f"SL={pos.sl_price:.6f} TP={pos.tp_price:.6f}")
 
-                    self._log_trade_close(pos, outcome, exit_price=actual_exit)
+                    self._log_trade_close(pos, outcome, exit_price=actual_exit,
+                                          close_time=actual_close_time)
 
                     with self._lock:
                         self._open_positions.pop(pos.symbol, None)
+                        _sk = 'S2' if pos.strategy.startswith('S2') else 'S1'
                         if outcome == 'WIN':
-                            self._consec_losses[pos.strategy] = 0
+                            self._consec_losses[_sk] = 0
                         else:
-                            self._consec_losses[pos.strategy] = \
-                                self._consec_losses.get(pos.strategy, 0) + 1
+                            self._consec_losses[_sk] = self._consec_losses.get(_sk, 0) + 1
 
                     if self.detector:
                         self.detector.on_trade_closed(pos.symbol, pos.strategy, outcome)
@@ -1191,11 +1184,12 @@ class OrderManager:
 
                             with self._lock:
                                 self._open_positions.pop(pos.symbol, None)
+                                _sk = 'S2' if pos.strategy.startswith('S2') else 'S1'
                                 if outcome == 'WIN':
-                                    self._consec_losses[pos.strategy] = 0
+                                    self._consec_losses[_sk] = 0
                                 else:
-                                    self._consec_losses[pos.strategy] = \
-                                        self._consec_losses.get(pos.strategy, 0) + 1
+                                    self._consec_losses[_sk] = \
+                                        self._consec_losses.get(_sk, 0) + 1
 
                             if self.detector:
                                 self.detector.on_trade_closed(pos.symbol, pos.strategy, outcome)
@@ -1251,6 +1245,20 @@ class OrderManager:
                 )
                 pos.open_time = row.get('open_time', pos.open_time)
                 pos.db_id     = row.get('id')
+                # Restore open_ts from DB open_time so userTrades startTime filter
+                # searches from the actual trade open, not the redeploy timestamp
+                try:
+                    ot = row.get('open_time', '')
+                    ot_clean = ot.replace(' UTC', '').strip()
+                    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M'):
+                        try:
+                            dt = datetime.strptime(ot_clean, fmt).replace(tzinfo=timezone.utc)
+                            pos.open_ts = int(dt.timestamp() * 1000)
+                            break
+                        except ValueError:
+                            continue
+                except Exception:
+                    pass  # keep default open_ts = redeploy time as fallback
                 self._open_positions[sym] = pos
                 log.info(f"[RESTORE] Loaded open position from DB: {sym} "
                          f"{pos.direction} entry={pos.entry_price} db_id={pos.db_id}")
@@ -1305,6 +1313,7 @@ class OrderManager:
 
             actual_exit = None
             outcome     = None
+            close_time  = datetime.now(tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')  # fallback
 
             # 1. Try userTrades with startTime filter
             try:
@@ -1335,7 +1344,7 @@ class OrderManager:
             # 2. Fallback to SL price if no trade found
             if actual_exit is None:
                 actual_exit = pos.sl_price
-                close_time  = datetime.now(tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+                # close_time already set to now() as fallback above
                 log.warning(f"[STARTUP] {symbol}: no trade history found — "
                             f"using SL ${actual_exit:.6f} as fallback exit")
 
@@ -1346,7 +1355,7 @@ class OrderManager:
                 outcome = 'WIN' if actual_exit <= pos.tp_price else 'LOSS'
 
             # 4. Calculate P&L from actual exit
-            notional = pos.margin_usdt * pos.leverage
+            notional = pos.quantity * pos.entry_price   # actual notional from real fill
             if pos.direction == 'LONG':
                 pnl_pct = (actual_exit - pos.entry_price) / pos.entry_price * 100
             else:
@@ -1430,8 +1439,9 @@ class OrderManager:
         else:
             log.warning(f"[LOG] Supabase insert_returning_id returned None for {pos.symbol} — close will fallback to insert")
 
-    def _log_trade_close(self, pos: OpenPosition, outcome: str, exit_price: float = None):
-        close_time = datetime.now(tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+    def _log_trade_close(self, pos: OpenPosition, outcome: str,
+                         exit_price: float = None, close_time: str = None):
+        close_time = close_time or datetime.now(tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
 
         if outcome == 'WIN':
             exit_p  = exit_price or pos.tp_price
@@ -1452,7 +1462,7 @@ class OrderManager:
             exit_p  = exit_price or pos.entry_price
             pnl_pct = 0.0
 
-        notional = pos.margin_usdt * pos.leverage
+        notional = pos.quantity * pos.entry_price   # actual notional from real fill
         pnl_usdt = notional * (pnl_pct / 100)
 
         # Exact fee calculation based on order types
