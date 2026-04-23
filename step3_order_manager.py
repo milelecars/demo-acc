@@ -340,19 +340,20 @@ class BinanceClient:
                                 quantity: float, tp_price: float) -> dict:
         """
         TAKE_PROFIT via POST /fapi/v1/algoOrder.
-        Uses closePosition=true — closes the ENTIRE position on trigger regardless
-        of size. Safer than quantity-based: survives any position size changes.
+        Uses explicit quantity with reduceOnly — Binance rejects closePosition=true
+        for TAKE_PROFIT type (error -4136).
         """
         params = {
-            'symbol':        symbol,
-            'side':          side,
-            'algoType':      'CONDITIONAL',
-            'type':          'TAKE_PROFIT',
-            'closePosition': 'true',           # close full position, ignore qty
-            'price':         self._fmt_price(tp_price),
-            'triggerPrice':  self._fmt_price(tp_price),
-            'timeInForce':   'GTC',
-            'workingType':   'CONTRACT_PRICE',
+            'symbol':       symbol,
+            'side':         side,
+            'algoType':     'CONDITIONAL',
+            'type':         'TAKE_PROFIT',
+            'quantity':     self._fmt_price(quantity),
+            'price':        self._fmt_price(tp_price),
+            'triggerPrice': self._fmt_price(tp_price),
+            'timeInForce':  'GTC',
+            'reduceOnly':   'true',
+            'workingType':  'CONTRACT_PRICE',
         }
         return self._post_algo('/v1/algoOrder', params)
 
@@ -360,19 +361,19 @@ class BinanceClient:
                               quantity: float, sl_price: float) -> dict:
         """
         STOP via POST /fapi/v1/algoOrder.
-        Uses closePosition=true — closes the ENTIRE position on trigger regardless
-        of size. Safer than quantity-based: survives any position size changes.
+        Uses explicit quantity with reduceOnly — consistent with TP order approach.
         """
         params = {
-            'symbol':        symbol,
-            'side':          side,
-            'algoType':      'CONDITIONAL',
-            'type':          'STOP',
-            'closePosition': 'true',           # close full position, ignore qty
-            'price':         self._fmt_price(sl_price),
-            'triggerPrice':  self._fmt_price(sl_price),
-            'timeInForce':   'GTC',
-            'workingType':   'CONTRACT_PRICE',
+            'symbol':       symbol,
+            'side':         side,
+            'algoType':     'CONDITIONAL',
+            'type':         'STOP',
+            'quantity':     self._fmt_price(quantity),
+            'price':        self._fmt_price(sl_price),
+            'triggerPrice': self._fmt_price(sl_price),
+            'timeInForce':  'GTC',
+            'reduceOnly':   'true',
+            'workingType':  'CONTRACT_PRICE',
         }
         return self._post_algo('/v1/algoOrder', params)
 
@@ -820,7 +821,8 @@ class OrderManager:
                           f"closing position immediately. Error: {tp_sl_err}")
                 try:
                     close_result = self.client.place_market_order(symbol, exit_side, qty, reduce_only=True)
-                    exit_price   = float(close_result.get('avgPrice', 0) or actual_entry)
+                    avg = float(close_result.get('avgPrice') or 0)
+                    exit_price = avg if avg > 0 else actual_entry
                     log.info(f"[EMERGENCY] {symbol}: position closed @ {exit_price:.6f}")
                 except Exception as close_err:
                     log.error(f"[EMERGENCY] {symbol}: FAILED to close position: {close_err}")
