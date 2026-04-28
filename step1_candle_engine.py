@@ -53,6 +53,8 @@ TESTNET       = os.getenv('TESTNET', 'true').lower() == 'true'
 INTERVAL      = os.getenv('INTERVAL', '15m')
 CANDLE_LIMIT  = 300      # rolling window size per symbol (≥250 for EMA200)
 RECONNECT_SEC = 5        # seconds between reconnection attempts
+STALE_SEC     = 90       # force-reconnect if no WS frames in this many seconds
+WATCHDOG_TICK = 15       # how often the watchdog checks staleness
 
 # Indicator periods
 EMA_FAST      = 9
@@ -406,11 +408,28 @@ class CandleEngine:
         engine.start()   # blocks forever, reconnects on drop
     """
 
-    def __init__(self, symbols, callback=None):
-        self.symbols  = symbols
-        self.callback = callback
-        self.store    = CandleStore(symbols)
-        self._running = False
+    def __init__(self, symbols, callback=None, status_callback=None):
+        self.symbols         = symbols
+        self.callback        = callback
+        self.status_callback = status_callback   # called with (event:str, detail:str)
+        self.store           = CandleStore(symbols)
+        self._running        = False
+        self._ws             = None
+        self._last_msg_ts    = 0.0   # epoch seconds of last frame received
+
+    def last_message_age_sec(self) -> float:
+        """Seconds since the last WS frame. inf if we've never received one."""
+        if self._last_msg_ts == 0.0:
+            return float('inf')
+        return time.time() - self._last_msg_ts
+
+    def _emit_status(self, event: str, detail: str = ''):
+        if not self.status_callback:
+            return
+        try:
+            self.status_callback(event, detail)
+        except Exception as e:
+            log.error(f"status_callback error: {e}")
 
     def start(self):
         """Seed history then start WebSocket loop (blocking)."""
@@ -421,10 +440,34 @@ class CandleEngine:
         seed_all(self.symbols, self.store)
 
         self._running = True
+
+        # Watchdog: force-close the socket if no frames arrive for STALE_SEC.
+        # This is the safety net for zombie connections (TCP alive, no data).
+        wd = threading.Thread(target=self._watchdog_loop, daemon=True, name='ws_watchdog')
+        wd.start()
+
         self._ws_loop()
 
     def stop(self):
         self._running = False
+        if self._ws is not None:
+            try: self._ws.close()
+            except Exception: pass
+
+    def _watchdog_loop(self):
+        log.info(f"WS watchdog started (stale threshold = {STALE_SEC}s)")
+        while self._running:
+            time.sleep(WATCHDOG_TICK)
+            if self._ws is None:
+                continue
+            age = self.last_message_age_sec()
+            if age > STALE_SEC:
+                log.warning(f"Watchdog: no WS frames for {age:.0f}s — forcing reconnect")
+                self._emit_status('stale', f'{age:.0f}s without data, forcing reconnect')
+                try:
+                    self._ws.close()   # makes run_forever return → loop reconnects
+                except Exception as e:
+                    log.error(f"Watchdog close error: {e}")
 
     def _ws_loop(self):
         """Outer loop — reconnects on any error. Single futures stream for all symbols."""
@@ -435,7 +478,7 @@ class CandleEngine:
             url     = f"{WS_BASE}?streams={streams}"
             log.info(f"Connecting WebSocket ({len(self.symbols)} streams)...")
 
-            ws = websocket.WebSocketApp(
+            self._ws = websocket.WebSocketApp(
                 url,
                 on_message = self._on_message,
                 on_error   = self._on_error,
@@ -443,14 +486,25 @@ class CandleEngine:
                 on_open    = self._on_open,
             )
 
-            ws.run_forever(ping_interval=20, ping_timeout=10)
+            try:
+                self._ws.run_forever(ping_interval=20, ping_timeout=10)
+            except Exception as e:
+                # Without this guard, a raise out of run_forever silently kills the
+                # thread — which is what happened in the 2026-04-24 incident.
+                log.error(f"run_forever raised: {e}", exc_info=True)
+                self._emit_status('error', f'run_forever raised: {e}')
+
+            self._ws = None
 
             if self._running:
                 log.warning(f"WebSocket disconnected. Reconnecting in {RECONNECT_SEC}s...")
+                self._emit_status('disconnected', 'reconnecting')
                 time.sleep(RECONNECT_SEC)
 
     def _on_open(self, ws):
         log.info("WebSocket connected [OK]")
+        self._last_msg_ts = time.time()
+        self._emit_status('connected', '')
 
     def _on_error(self, ws, error):
         log.error(f"WebSocket error: {error}")
@@ -459,6 +513,7 @@ class CandleEngine:
         log.info(f"WebSocket closed: {code} {msg}")
 
     def _on_message(self, ws, raw):
+        self._last_msg_ts = time.time()   # every frame, not just candle close
         try:
             msg  = json.loads(raw)
             data = msg.get('data', {})

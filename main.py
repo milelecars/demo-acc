@@ -99,6 +99,22 @@ def proxy_stats():
     return jsonify({'consec_losses': {'S1': 0, 'S2': 0}, 'open_count': 0})
 
 
+@app.route('/health')
+def health():
+    """
+    Liveness signal for Railway. Returns 503 when the candle engine is stale
+    so Railway restarts the container instead of leaving a brain-dead bot up.
+    """
+    if engine is None:
+        return jsonify({'status': 'starting', 'age_sec': None}), 503
+    age = engine.last_message_age_sec()
+    if age == float('inf'):
+        return jsonify({'status': 'no_data_yet', 'age_sec': None}), 503
+    if age > 120:
+        return jsonify({'status': 'stale', 'age_sec': round(age, 1)}), 503
+    return jsonify({'status': 'ok', 'age_sec': round(age, 1)}), 200
+
+
 @app.after_request
 def cors(r):
     r.headers['Access-Control-Allow-Origin'] = '*'
@@ -188,20 +204,47 @@ def main():
     manager._log_trade_close = _patched_close
 
     detector.on_signal = on_signal_with_alert
-    engine = CandleEngine(SYMBOLS, callback=candle_callback)
+
+    def on_ws_status(event, detail):
+        if alerts:
+            alerts.on_websocket_event(event, detail)
+
+    engine = CandleEngine(SYMBOLS, callback=candle_callback,
+                          status_callback=on_ws_status)
     alerts.send_startup(len(SYMBOLS), TESTNET)
 
     log.info("All components ready. Starting candle engine...")
 
     try:
-        engine.start()
+        engine.start()   # blocks until WS loop exits
     except KeyboardInterrupt:
         log.info("Bot stopped by user.")
         if alerts: alerts.on_error("Bot stopped by user (KeyboardInterrupt)")
+        return
+    except Exception as e:
+        log.error(f"Engine crashed: {e}", exc_info=True)
+        if alerts: alerts.on_error(f"Engine crashed: {e}")
+        sys.exit(1)
+
+    # engine.start() is supposed to block forever. If it returns, something
+    # went wrong silently — exit so Railway restarts the container.
+    log.error("Engine returned unexpectedly — exiting so Railway restarts")
+    if alerts: alerts.on_error("Engine returned unexpectedly")
+    sys.exit(1)
 
 
 if __name__ == '__main__':
     import threading
-    t = threading.Thread(target=main, daemon=True)
-    t.start()
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    # Flask runs in a daemon thread; the candle engine runs on the main thread.
+    # If the engine dies, the main thread exits → daemon Flask dies → process
+    # exits → Railway restarts. Previously this was inverted, so a dead engine
+    # left Flask serving 200s while no market data was processed for days.
+    flask_thread = threading.Thread(
+        target=lambda: app.run(host='0.0.0.0',
+                               port=int(os.environ.get('PORT', 5000)),
+                               use_reloader=False),
+        daemon=True,
+        name='flask',
+    )
+    flask_thread.start()
+    main()

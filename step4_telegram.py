@@ -203,6 +203,18 @@ class AlertManager:
         msg = f"<b>Bot Error</b>\n{message}\nTime: {_now()}"
         self.bot.send(msg)
 
+    # ── WebSocket lifecycle alert ─────────────────────────────────────────────
+
+    def on_websocket_event(self, event: str, detail: str = ''):
+        if not self.bot.enabled:
+            return
+        msg = f"<b>WS {event.upper()}</b>"
+        if detail:
+            msg += f"\n{detail}"
+        msg += f"\nTime: {_now()}"
+        self.bot.send(msg)
+        log.info(f"WS event alert sent: {event} ({detail})")
+
     # ── Daily summary loop ────────────────────────────────────────────────────
 
     def _daily_summary_loop(self):
