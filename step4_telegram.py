@@ -205,8 +205,14 @@ class AlertManager:
 
     # ── WebSocket lifecycle alert ─────────────────────────────────────────────
 
+    # Routine reconnect lifecycle ('connected', 'disconnected', 'stale') is
+    # silenced — only real failures (e.g. 'error') trigger a Telegram alert.
+    _ALERT_EVENTS = {'error'}
+
     def on_websocket_event(self, event: str, detail: str = ''):
         if not self.bot.enabled:
+            return
+        if event not in self._ALERT_EVENTS:
             return
         msg = f"<b>WS {event.upper()}</b>"
         if detail:
