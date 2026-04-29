@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -m py_compile step1_candle_engine.py step4_telegram.py main.py)"
+      "Bash(python -m py_compile step1_candle_engine.py step4_telegram.py main.py)",
+      "Bash(python *)"
     ]
   }
 }
