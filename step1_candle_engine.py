@@ -512,8 +512,15 @@ class CandleEngine:
     def _on_close(self, ws, code, msg):
         log.info(f"WebSocket closed: {code} {msg}")
 
+    _frame_count = 0
+
     def _on_message(self, ws, raw):
         self._last_msg_ts = time.time()   # every frame, not just candle close
+        # Diagnostic: log first 5 frames after each (re)connect to prove
+        # whether Binance is actually sending data on this WS.
+        CandleEngine._frame_count += 1
+        if CandleEngine._frame_count <= 5 or CandleEngine._frame_count % 500 == 0:
+            log.info(f"[WS-FRAME] #{CandleEngine._frame_count} {len(raw)} bytes")
         try:
             msg  = json.loads(raw)
             data = msg.get('data', {})

@@ -379,19 +379,33 @@ class SignalDetector:
             return   # try again next candle (N+1)
 
         # F3 — EMA200 trend gate
-        if direction == 'LONG'  and c_close <= ema200: return
-        if direction == 'SHORT' and c_close >= ema200: return
+        if direction == 'LONG'  and c_close <= ema200:
+            log.debug(f"{symbol} S1: F3 rejected (LONG close {c_close:.4f} <= EMA200 {ema200:.4f})")
+            return
+        if direction == 'SHORT' and c_close >= ema200:
+            log.debug(f"{symbol} S1: F3 rejected (SHORT close {c_close:.4f} >= EMA200 {ema200:.4f})")
+            return
 
         # F4 — ADX strength
-        if adx <= S1_ADX_MIN: return
+        if adx <= S1_ADX_MIN:
+            log.debug(f"{symbol} S1: F4 rejected (ADX {adx:.1f} <= {S1_ADX_MIN})")
+            return
 
         # F5 — DI direction
-        if direction == 'LONG'  and not (di_plus > di_minus): return
-        if direction == 'SHORT' and not (di_minus > di_plus): return
+        if direction == 'LONG'  and not (di_plus > di_minus):
+            log.debug(f"{symbol} S1: F5 rejected (LONG DI+ {di_plus:.1f} not > DI- {di_minus:.1f})")
+            return
+        if direction == 'SHORT' and not (di_minus > di_plus):
+            log.debug(f"{symbol} S1: F5 rejected (SHORT DI- {di_minus:.1f} not > DI+ {di_plus:.1f})")
+            return
 
         # F6 — MACD momentum
-        if direction == 'LONG'  and not (macd > macd_sig and macd_hist > 0): return
-        if direction == 'SHORT' and not (macd < macd_sig and macd_hist < 0): return
+        if direction == 'LONG'  and not (macd > macd_sig and macd_hist > 0):
+            log.debug(f"{symbol} S1: F6 rejected (LONG MACD={macd:.4f} sig={macd_sig:.4f} hist={macd_hist:.4f})")
+            return
+        if direction == 'SHORT' and not (macd < macd_sig and macd_hist < 0):
+            log.debug(f"{symbol} S1: F6 rejected (SHORT MACD={macd:.4f} sig={macd_sig:.4f} hist={macd_hist:.4f})")
+            return
 
         # ── All 6 filters passed ─────────────────────────────────────────────
         entry = c_close

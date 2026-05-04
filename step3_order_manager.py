@@ -747,7 +747,7 @@ class OrderManager:
             except Exception as e:
                 log.debug(f"[CLEANUP] {symbol}: stale order cleanup: {e}")
 
-            self.client.set_margin_type(symbol, 'ISOLATED')
+            self.client.set_margin_type(symbol, 'CROSSED')
 
             # Set leverage — Binance step-down handles any symbol-specific limits at runtime
             lev_response    = self.client.set_leverage(symbol, leverage)

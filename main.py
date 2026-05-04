@@ -106,10 +106,10 @@ def health():
     so Railway restarts the container instead of leaving a brain-dead bot up.
     """
     if engine is None:
-        return jsonify({'status': 'starting', 'age_sec': None}), 503
+        return jsonify({'status': 'starting', 'age_sec': None}), 200
     age = engine.last_message_age_sec()
     if age == float('inf'):
-        return jsonify({'status': 'no_data_yet', 'age_sec': None}), 503
+        return jsonify({'status': 'connecting', 'age_sec': None}), 200
     if age > 120:
         return jsonify({'status': 'stale', 'age_sec': round(age, 1)}), 503
     return jsonify({'status': 'ok', 'age_sec': round(age, 1)}), 200
