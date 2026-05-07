@@ -39,23 +39,25 @@ def binance_signed(path, params={}):
 # temp
 @app.route('/debug/ws_test')
 def debug_ws_test():
-    import requests as req
-    try:
-        r = req.get(
-            'https://fstream.binance.com/stream?streams=btcusdt@kline_1m',
-            timeout=8, stream=True
-        )
-        chunk = next(r.iter_content(chunk_size=500), None)
-        return jsonify({
-            'status_code': r.status_code,
-            'headers': dict(r.headers),
-            'data': chunk.decode('utf-8', errors='replace') if chunk else 'NO DATA RECEIVED',
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)})
+    import websocket, threading, time
+    received = []
+    def on_message(ws, msg):
+        received.append(msg[:200])
+        ws.close()
+    def on_error(ws, err):
+        received.append(f'ERROR: {err}')
+    ws = websocket.WebSocketApp(
+        'wss://fstream.binance.com/ws/btcusdt@kline_1m',
+        on_message=on_message,
+        on_error=on_error,
+    )
+    t = threading.Thread(target=lambda: ws.run_forever(ping_interval=20, ping_timeout=10))
+    t.daemon = True
+    t.start()
+    t.join(timeout=8)
+    return jsonify({'received': received, 'count': len(received)})
 
 
-        
 
 @app.route('/proxy/fapi/v2/account')
 def proxy_fapi_account():
