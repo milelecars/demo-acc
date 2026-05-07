@@ -39,20 +39,24 @@ def binance_signed(path, params={}):
 # temp
 @app.route('/debug/ws_test')
 def debug_ws_test():
-    import subprocess
+    import requests as req
     try:
-        result = subprocess.run(
-            ['curl', '-s', '--max-time', '8',
-             'https://fstream.binance.com/stream?streams=btcusdt@kline_1m'],
-            capture_output=True, text=True, timeout=10
+        r = req.get(
+            'https://fstream.binance.com/stream?streams=btcusdt@kline_1m',
+            timeout=8, stream=True
         )
+        chunk = next(r.iter_content(chunk_size=500), None)
         return jsonify({
-            'stdout': result.stdout[:500] if result.stdout else '',
-            'stderr': result.stderr[:500] if result.stderr else '',
-            'returncode': result.returncode,
+            'status_code': r.status_code,
+            'headers': dict(r.headers),
+            'data': chunk.decode('utf-8', errors='replace') if chunk else 'NO DATA RECEIVED',
         })
     except Exception as e:
         return jsonify({'error': str(e)})
+
+
+        
+
 @app.route('/proxy/fapi/v2/account')
 def proxy_fapi_account():
     return jsonify(binance_signed('/v2/account'))
