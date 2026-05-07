@@ -37,6 +37,14 @@ def binance_signed(path, params={}):
 
 # ── Futures proxy routes ─────────────────────────────────────────────────────
 # temp
+@app.route('/debug/ws_version')
+def debug_ws_version():
+    import pkg_resources
+    return jsonify({
+        'version': pkg_resources.get_distribution('websocket-client').version
+    })
+
+    
 @app.route('/debug/ws_test')
 def debug_ws_test():
     import websocket, threading, time
