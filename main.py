@@ -44,7 +44,26 @@ def debug_ws_version():
         'version': pkg_resources.get_distribution('websocket-client').version
     })
 
-    
+@app.route('/debug/ws_test2')
+def debug_ws_test2():
+    import websocket, threading, time
+    received = []
+    def on_msg(ws, msg): 
+        received.append(msg[:100])
+        ws.close()
+    def on_open(ws):
+        received.append('OPENED')
+    ws = websocket.WebSocketApp(
+        'wss://fstream.binance.com/ws/btcusdt@kline_1m',
+        on_message=on_msg,
+        on_open=on_open,
+    )
+    t = threading.Thread(target=ws.run_forever)
+    t.daemon = True
+    t.start()
+    t.join(timeout=10)
+    return jsonify({'received': received, 'version': websocket.__version__})
+
 @app.route('/debug/ws_test')
 def debug_ws_test():
     import websocket, threading, time
