@@ -476,7 +476,6 @@ class CandleEngine:
         while self._running:
             streams = "/".join(f"{s.lower()}@kline_{INTERVAL}" for s in self.symbols)
             url     = f"{WS_BASE}?streams={streams}"
-            log.info(f"Connecting WebSocket ({len(self.symbols)} streams)...")
 
             self._ws = websocket.WebSocketApp(
                 url,
@@ -497,20 +496,16 @@ class CandleEngine:
             self._ws = None
 
             if self._running:
-                log.warning(f"WebSocket disconnected. Reconnecting in {RECONNECT_SEC}s...")
                 self._emit_status('disconnected', 'reconnecting')
                 time.sleep(RECONNECT_SEC)
 
     def _on_open(self, ws):
-        log.info("WebSocket connected [OK]")
         self._last_msg_ts = time.time()
         self._emit_status('connected', '')
 
     def _on_error(self, ws, error):
         log.error(f"WebSocket error: {error}")
 
-    def _on_close(self, ws, code, msg):
-        log.info(f"WebSocket closed: {code} {msg}")
 
     _frame_count = 0
 
