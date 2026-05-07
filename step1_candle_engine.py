@@ -486,7 +486,7 @@ class CandleEngine:
             )
 
             try:
-                self._ws.run_forever(ping_interval=20, ping_timeout=10)
+                self._ws.run_forever()
             except Exception as e:
                 # Without this guard, a raise out of run_forever silently kills the
                 # thread — which is what happened in the 2026-04-24 incident.
