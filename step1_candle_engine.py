@@ -506,6 +506,8 @@ class CandleEngine:
     def _on_error(self, ws, error):
         log.error(f"WebSocket error: {error}")
 
+    def _on_close(self, ws, code, msg):
+        pass
 
     _frame_count = 0
 
